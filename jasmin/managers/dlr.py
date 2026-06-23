@@ -5,11 +5,12 @@ from logging.handlers import TimedRotatingFileHandler
 from twisted.internet import defer
 from twisted.internet import reactor
 from twisted.internet.error import AlreadyCalled, AlreadyCancelled
-from txamqp.queue import Closed
+from pika.exceptions import ConsumerCancelled
 from txredisapi import ConnectionError
 from smpp.pdu.pdu_types import RegisteredDeliveryReceipt
 
 from jasmin.managers.content import DLRContentForHttpapi, DLRContentForSmpps
+from jasmin.queues.delivery import DeliveryMessage
 from jasmin.tools.singleton import Singleton
 from jasmin.tools import to_enum
 
@@ -37,6 +38,7 @@ class DLRLookup:
     def __init__(self, config, amqpBroker, redisClient):
         self.pid = config.pid
         self.q = None
+        self.chan = None  # this consumer's own channel (per-consumer channel isolates delivery tags)
         self.config = config
         self.amqpBroker = amqpBroker
         self.redisClient = redisClient
@@ -66,11 +68,13 @@ class DLRLookup:
         consumerTag = 'DLRLookup-%s' % self.pid
         queueName = 'DLRLookup-%s' % self.pid  # A local queue to this object
         routing_key = 'dlr.*'
-        yield self.amqpBroker.chan.exchange_declare(exchange='messaging', type='topic')
+        self.chan = yield self.amqpBroker.newChannel()
+        yield self.chan.exchange_declare(exchange='messaging', exchange_type='topic')
         yield self.amqpBroker.named_queue_declare(queue=queueName)
-        yield self.amqpBroker.chan.queue_bind(queue=queueName, exchange="messaging", routing_key=routing_key)
-        yield self.amqpBroker.chan.basic_consume(queue=queueName, no_ack=False, consumer_tag=consumerTag)
-        self.amqpBroker.client.queue(consumerTag).addCallback(self.setup_callbacks)
+        yield self.chan.queue_bind(queue=queueName, exchange="messaging", routing_key=routing_key)
+        self.q, _consumer_tag = yield self.chan.basic_consume(
+            queue=queueName, auto_ack=False, consumer_tag=consumerTag)
+        self.setup_callbacks(self.q)
 
     def clearRequeueTimer(self, msgid):
         if msgid in self.requeue_timers:
@@ -120,39 +124,50 @@ class DLRLookup:
             self.log.debug("Requeuing Content[%s] without delay", msgid)
             yield self.rejectMessage(message, requeue=1)
 
-    @defer.inlineCallbacks
     def rejectMessage(self, message, requeue=0):
-        if requeue == 0 and message.content.properties['message-id'] in self.lookup_retrials:
+        msgid = message.content.properties['message-id']
+        if requeue == 0 and msgid in self.lookup_retrials:
             # Remove retrial tracker
-            del self.lookup_retrials[message.content.properties['message-id']]
-        
-        self.clearRequeueTimer(message.content.properties['message-id'])
+            del self.lookup_retrials[msgid]
+
+        self.clearRequeueTimer(msgid)
         if not self.amqpBroker.connected:
             self.log.error("Cannot reject message, AMQP Broker is not connected !")
-            defer.returnValue(False)
+            return
 
-        yield self.amqpBroker.chan.basic_reject(delivery_tag=message.delivery_tag, requeue=requeue)
+        # Reject on the channel that delivered the message. If that channel has since closed, the broker
+        # has already requeued the delivery, so there is nothing left to do.
+        try:
+            message.channel.basic_reject(delivery_tag=message.delivery_tag, requeue=requeue)
+        except Exception as e:
+            self.log.warning("Could not reject Content[%s] (delivering channel likely closed): %s", msgid, e)
 
-    @defer.inlineCallbacks
     def ackMessage(self, message):
+        msgid = message.content.properties['message-id']
         # Remove retrial tracker
-        if message.content.properties['message-id'] in self.lookup_retrials:
-            # Remove retrial tracker
-            del self.lookup_retrials[message.content.properties['message-id']]
-        
-        self.clearRequeueTimer(message.content.properties['message-id'])
+        if msgid in self.lookup_retrials:
+            del self.lookup_retrials[msgid]
+
+        self.clearRequeueTimer(msgid)
         if not self.amqpBroker.connected:
             self.log.error("Cannot ack message, AMQP Broker is not connected !")
-            defer.returnValue(False)
+            return
 
-        yield self.amqpBroker.chan.basic_ack(message.delivery_tag)
+        try:
+            message.channel.basic_ack(delivery_tag=message.delivery_tag)
+        except Exception as e:
+            self.log.warning("Could not ack Content[%s] (delivering channel likely closed): %s", msgid, e)
 
     def setup_callbacks(self, q):
         if self.q is None:
             self.q = q
             self.log.info('DLRLookup (%s) is ready.', self.pid)
 
-        q.get().addCallback(self.dlr_callback_dispatcher).addErrback(self.dlr_errback)
+        q.get().addCallback(self._on_message).addErrback(self.dlr_errback)
+
+    def _on_message(self, received):
+        # Wrap pika's ReceivedMessage in the txamqp-style shim the dispatcher below expects.
+        return self.dlr_callback_dispatcher(DeliveryMessage(received))
 
     @defer.inlineCallbacks
     def dlr_callback_dispatcher(self, message):
@@ -175,15 +190,9 @@ class DLRLookup:
             yield self.rejectMessage(message)
 
     def dlr_errback(self, error):
-        """It appears that when closing a queue with the close() method it errbacks with
-        a txamqp.queue.Closed exception, didnt find a clean way to stop consuming a queue
-        without errbacking here so this is a workaround to make it clean, it can be considered
-        as a @TODO requiring knowledge of the queue api behaviour
-        """
-        if error.check(Closed) is None:
-            # @todo: implement this errback
-            # For info, this errback is called whenever:
-            # - an error has occured inside dlr_callback_dispatcher
+        # ConsumerCancelled fires when the consumer's queue is closed/cancelled (expected on teardown);
+        # anything else is a real error inside dlr_callback_dispatcher.
+        if error.check(ConsumerCancelled) is None:
             self.log.error("Error in dlr_callback_dispatcher: %s", error)
 
     @defer.inlineCallbacks

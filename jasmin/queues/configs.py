@@ -6,8 +6,6 @@ import logging
 import os
 import re
 
-import txamqp
-
 from jasmin.config import ConfigFile, ROOT_PATH, LOG_PATH
 
 CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
@@ -32,7 +30,6 @@ class AmqpConfig(ConfigFile):
             self.vhost = self._get('amqp-broker', 'vhost', '/')
 
         self.port = self._getint('amqp-broker', 'port', 5672)
-        self.spec = self._get('amqp-broker', 'spec', '%s/amqp0-9-1.xml' % RESOURCE_PATH)
         self.heartbeat = self._getint('amqp-broker', 'heartbeat', 0)
 
         # Logging
@@ -49,8 +46,3 @@ class AmqpConfig(ConfigFile):
         self.reconnectOnConnectionLossDelay = self._getint('amqp-broker', 'connection_loss_retry_delay', 10)
         self.reconnectOnConnectionFailureDelay = self._getint(
             'amqp-broker', 'connection_failure_retry_delay', 10)
-
-    def getSpec(self):
-        """Will return the specifications from self.spec file"""
-
-        return txamqp.spec.load(self.spec)

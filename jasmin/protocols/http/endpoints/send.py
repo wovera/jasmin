@@ -4,6 +4,7 @@ import json
 import pickle
 
 from twisted.internet import reactor, defer
+from twisted.python.failure import Failure
 from twisted.web.resource import Resource
 from twisted.web.server import NOT_DONE_YET
 from smpp.pdu.constants import priority_flag_value_map
@@ -361,9 +362,12 @@ class Send(Resource):
                 dlr_connector=routedConnector.cid)
 
             # Build final response
-            if not c.result:
+            # A failed submit Deferred carries a Failure in .result, which is truthy: guard against it
+            # explicitly so an errored submit (e.g. a broker publish failure) is rejected as a server error
+            # instead of being rendered as Success "<failure repr>" with a 200 status.
+            if not c.result or isinstance(c.result, Failure):
                 self.stats.inc('server_error_count')
-                self.log.error('Failed to send SubmitSmPDU to [cid:%s]', routedConnector.cid)
+                self.log.error('Failed to send SubmitSmPDU to [cid:%s]: %s', routedConnector.cid, c.result)
                 raise ServerError('Cannot send submit_sm, check SMPPClientManagerPB log file for details')
             else:
                 self.stats.inc('success_count')

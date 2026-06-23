@@ -1,6 +1,6 @@
 import pickle as _pickle
 
-from txamqp.content import Content
+from jasmin.queues.content import Content
 
 
 class PDU(Content):

@@ -1,10 +1,12 @@
-from txamqp.protocol import AMQClient
+from pika.adapters.twisted_connection import TwistedProtocolConnection
 
 
-class AmqpProtocol(AMQClient):
+class AmqpProtocol(TwistedProtocolConnection):
+    """pika's Twisted connection, wired to AmqpFactory. Logs on connect; pika's own `ready`
+    Deferred (set in TwistedProtocolConnection.__init__, fires with the live connection once the
+    AMQP handshake completes) is what AmqpFactory waits on to open the control channel."""
+
     def connectionMade(self):
-        """Called when a connection has been made."""
-        self.factory.log.info("Connection made to %s:%s" % (self.factory.config.host, self.factory.config.port))
-        AMQClient.connectionMade(self)
-
-        self.factory.connectDeferred.callback(self)
+        self.factory.log.info(
+            "Connection made to %s:%s", self.factory.config.host, self.factory.config.port)
+        TwistedProtocolConnection.connectionMade(self)

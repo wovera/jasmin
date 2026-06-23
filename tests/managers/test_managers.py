@@ -25,6 +25,7 @@ from jasmin.protocols.smpp.configs import SMPPClientConfig
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
 from tests.protocols.smpp.smsc_simulator import HappySMSC, HappySMSCRecorder, DeliverSMSMSC
 from jasmin.queues.configs import AmqpConfig
+from jasmin.queues.delivery import DeliveryMessage
 from jasmin.queues.factory import AmqpFactory
 from jasmin.routing.Bills import SubmitSmBill
 from jasmin.routing.Routables import RoutableDeliverSm
@@ -1107,7 +1108,7 @@ class ClientConnectorDeliverSmTestCases(SMSCSimulatorDeliverSM):
         # Bind to deliver.sm.CID
         routingKey = 'deliver.sm.%s' % self.defaultConfig.id
         queueName = 'test_deliverSm'
-        yield self.amqpBroker.chan.exchange_declare(exchange='messaging', type='topic')
+        yield self.amqpBroker.chan.exchange_declare(exchange='messaging', exchange_type='topic')
         yield self.amqpBroker.named_queue_declare(queue=queueName, exclusive=True, auto_delete=True)
         yield self.amqpBroker.chan.queue_bind(queue=queueName, exchange="messaging", routing_key=routingKey)
 
@@ -1121,9 +1122,9 @@ class ClientConnectorDeliverSmTestCases(SMSCSimulatorDeliverSM):
 
         # Listen on the deliver.sm queue
         consumerTag = 'test_deliverSm'
-        yield self.amqpBroker.chan.basic_consume(queue=queueName, no_ack=True, consumer_tag=consumerTag)
-        deliver_sm_q = yield self.amqpBroker.client.queue(consumerTag)
-        deliver_sm_q.get().addCallback(self.deliver_sm_callback)
+        deliver_sm_q, _consumer_tag = yield self.amqpBroker.chan.basic_consume(
+            queue=queueName, auto_ack=True, consumer_tag=consumerTag)
+        deliver_sm_q.get().addCallback(lambda received: self.deliver_sm_callback(DeliveryMessage(received)))
 
         yield self.stop(self.defaultConfig.id)
 

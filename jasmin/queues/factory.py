@@ -2,9 +2,11 @@
 import sys
 import logging
 from logging.handlers import TimedRotatingFileHandler
-from twisted.internet.protocol import ClientFactory
+
+import pika
 from twisted.internet import defer, reactor
-from txamqp.client import TwistedDelegate
+from twisted.internet.protocol import ClientFactory
+
 from jasmin.queues.protocol import AmqpProtocol
 
 LOG_CATEGORY = "jasmin-amqp-factory"
@@ -19,13 +21,20 @@ class AmqpFactory(ClientFactory):
         self.connected = False
         self.config = config
         self.channelReady = None
+        self.exitDeferred = None
+        self.connectDeferred = None
 
-        self.delegate = TwistedDelegate()
-
-        self.amqp = None  # The protocol instance.
-        self.client = None  # Alias for protocol instance
-
+        self.client = None  # the pika connection (TwistedProtocolConnection), set in buildProtocol
+        self.chan = None  # the control channel (declares + publishes); consumers get their own via newChannel()
         self.queues = []
+
+        self._params = pika.ConnectionParameters(
+            host=config.host,
+            port=config.port,
+            virtual_host=config.vhost,
+            credentials=pika.PlainCredentials(config.username, config.password),
+            heartbeat=config.heartbeat,
+        )
 
         # Set up a dedicated logger
         self.log = logging.getLogger(LOG_CATEGORY)
@@ -42,48 +51,27 @@ class AmqpFactory(ClientFactory):
             self.log.propagate = False
 
     def preConnect(self):
-        """Initiate deferreds before connecting
-        these deferreds are initiated separately and not within self._connect()
-        because this one is not called when jasmin is ran as a twistd plugin.
-        """
-
+        """Initiate deferreds before connecting. Separate from _connect() because the bins call it
+        directly when jasmin runs as a twistd plugin."""
         self.connectionRetry = True
-
         self.exitDeferred = defer.Deferred()
-        if self.channelReady is None:
+        if self.channelReady is None or self.channelReady is False:
             self.channelReady = defer.Deferred()
-
-        try:
-            # Check if connectDeferred is already set
-            self.connectDeferred
-
-            # Reset deferred if it were called before
-            if self.connectDeferred.called is True:
-                self.connectDeferred = defer.Deferred()
-                self.connectDeferred.addCallback(self.authenticate)
-        except AttributeError:
-            # Set connectDeferred
+        if self.connectDeferred is None or self.connectDeferred.called:
             self.connectDeferred = defer.Deferred()
-            self.connectDeferred.addCallback(self.authenticate)
 
     def startedConnecting(self, connector):
         self.log.info("Connecting to %s ...", connector.getDestination())
 
     def getExitDeferred(self):
-        """Get a Deferred so you can be notified on disconnect and exited
-        This deferred is called once disconnection occurs without a further
-        reconnection retrys
-        """
+        """Notified on disconnect+exit without further reconnection retries."""
         return self.exitDeferred
 
     def getChannelReadyDeferred(self):
-        """Get a Deferred so you can be notified when channel is ready
-        """
+        """Notified when the control channel is open and ready."""
         return self.channelReady
 
     def clientConnectionFailed(self, connector, reason):
-        """Connection failed
-        """
         self.log.error("Connection failed. Reason: %s", str(reason))
         self.connected = False
 
@@ -92,21 +80,19 @@ class AmqpFactory(ClientFactory):
             self.reconnectTimer = reactor.callLater(self.config.reconnectOnConnectionFailureDelay,
                                                     self.reConnect, connector)
         else:
-            self.connectDeferred.errback(reason)
+            if self.connectDeferred is not None and not self.connectDeferred.called:
+                self.connectDeferred.errback(reason)
             self.exitDeferred.callback(self)
             self.log.info("Exiting.")
 
     def clientConnectionLost(self, connector, reason):
-        """Connection lost
-        """
-        if not 'Connection was closed cleanly.' in str(reason):
-            # dont log an error when the queue closed as expected
+        if 'Connection was closed cleanly.' not in str(reason):
             self.log.error("Connection lost. Reason: %s", str(reason))
         else:
             self.log.info("Connection lost. Reason: %s", str(reason))
         self.connected = False
-
         self.client = None
+        self.chan = None
 
         if self.config.reconnectOnConnectionLoss and self.connectionRetry:
             self.log.info("Reconnecting after %d seconds ...", self.config.reconnectOnConnectionLossDelay)
@@ -120,121 +106,98 @@ class AmqpFactory(ClientFactory):
         if connector is None:
             self.log.error("No connector to retry !")
         else:
-            # And try to connect again
             self.preConnect()
             connector.connect()
 
     def _connect(self):
+        self.preConnect()
         self.log.info('Establishing TCP connection to %s:%d', self.config.host, self.config.port)
         reactor.connectTCP(self.config.host, self.config.port, self)
-
-        self.preConnect()
         return self.connectDeferred
 
     def connect(self):
-        self._connect()
-
-        return self.connectDeferred
+        return self._connect()
 
     def buildProtocol(self, addr):
-        # If heartbeat is 0, it is disabled, otherwise heartbeat is the number
-        # of seconds between each AMQP heartbeat. Defaults to 0
-        p = self.protocol(self.delegate, self.config.vhost, self.config.getSpec(),
-                          heartbeat=self.config.heartbeat)
+        p = self.protocol(self._params)
         p.factory = self  # Tell the protocol about this factory.
-
-        self.client = p  # Store the protocol.
-
+        self.client = p  # Store the connection.
+        # pika fires `ready` with the live connection once the AMQP handshake completes.
+        p.ready.addCallback(self._on_connection_ready)
+        p.ready.addErrback(self._on_connection_failed)
         return p
 
-    def authenticate(self, ignore):
-        # Authenticate.
-        deferred = self.client.start({"LOGIN": self.config.username, "PASSWORD": self.config.password})
-        deferred.addCallback(self._authenticated)
-        deferred.addErrback(self._authentication_failed)
+    @defer.inlineCallbacks
+    def _on_connection_ready(self, connection):
+        """Open the control channel (for declares + publishes) and signal readiness."""
+        self.log.info("AMQP connection ready; opening control channel")
+        try:
+            self.chan = yield connection.channel()
+            self.connected = True
+            self.queues = []
+            self.channelReady.callback(self)
+            if self.connectDeferred is not None and not self.connectDeferred.called:
+                self.connectDeferred.callback(self)
+        except Exception as e:
+            self._on_connection_failed(e)
 
-    def _authenticated(self, ignore):
-        """Called when the connection has been authenticated."""
-        self.log.info("Successfull authentication")
+    def _on_connection_failed(self, error):
+        self.log.error("AMQP connection/channel setup failed: %s", error)
+        if self.connectDeferred is not None and not self.connectDeferred.called:
+            self.connectDeferred.errback(error)
 
-        # Get a channel.
-        d = self.client.channel(1)
-        d.addCallback(self._got_channel)
-        d.addErrback(self._got_channel_failed)
-
-    def _got_channel(self, chan):
-        self.log.info("Got channel")
-
-        self.chan = chan
-        self.queues = []
-
-        d = self.chan.channel_open()
-        d.addCallback(self._channel_open)
-        d.addErrback(self._channel_open_failed)
-
-    def _channel_open(self, arg):
-        """Called when the channel is open."""
-        self.log.info("The channel is open")
-
-        # Flag that the connection is open.
-        self.connected = True
-        self.channelReady.callback(self)
-
-    def _channel_open_failed(self, error):
-        self.log.error("Channel open failed: %s", error)
-
-    def _got_channel_failed(self, error):
-        self.log.error("Error getting channel: %s", error)
-
-    def _authentication_failed(self, error):
-        self.log.error("AMQP authentication failed: %s", error)
+    def newChannel(self):
+        """A fresh, open pika channel. One per consumer/role so delivery-tag spaces stay isolated and acks
+        go back on the channel that delivered the message. Returns a Deferred yielding the channel."""
+        return self.client.channel()
 
     def disconnect(self, reason=None):
         self.channelReady = False
 
         if self.client is not None:
-            return self.client.close(reason)
+            # pika's close() returns self.closed, which is None until the connection actually closes; the
+            # reliable "transport is fully gone" signal is the factory's exitDeferred (fired by
+            # clientConnectionLost), so callers can yield this and the reactor is clean afterwards.
+            self.client.close()
+            return self.exitDeferred
 
         return None
 
     def named_queue_declare(self, *args, **keys):
-        """This is a wrapper to channel's queue_declare method
-        it is intended to avoid multiple declaration of the same queue
-        using self.queues which holds all declared queues in the connection
-        """
-
+        """Wrapper around the control channel's queue_declare that dedups redeclaration via self.queues."""
         if not self.connected:
             self.log.error("AMQP Client is not connected, cannot queue_declare")
             return None
 
         for q in self.queues:
-            if q == keys['queue']:
-                self.log.debug('Queue [%s] is already declared, its okay .. no need to redeclare it', q)
+            if q == keys.get('queue'):
+                self.log.debug('Queue [%s] is already declared, no need to redeclare it', q)
                 return None
 
         return self.chan.queue_declare(*args, **keys).addCallback(self._queue_declared)
 
-    def _queue_declared(self, queue):
-        self.log.info("A new queue has been successfully declared [%s]", queue.queue)
-        self.queues.append(queue.queue)
+    def _queue_declared(self, frame):
+        # pika's queue_declare result carries the queue name on the method frame.
+        name = frame.method.queue
+        self.log.info("A new queue has been successfully declared [%s]", name)
+        self.queues.append(name)
+        return frame
 
-    def publish(self, **args):
-        """This is a wrapper to channel's publish method
-        it is intended for connection checking before publishing
-        """
-
+    def publish(self, exchange='', routing_key='', content=None):
+        """Publish a Content (jasmin.queues.content.Content subclass) on the control channel."""
         if not self.connected:
-            self.log.error("AMQP Client is not connected, cannot publish: %s", args)
+            self.log.error("AMQP Client is not connected, cannot publish to [%s/%s]", exchange, routing_key)
             return None
 
-        return self.chan.basic_publish(**args)
+        return self.chan.basic_publish(
+            exchange=exchange,
+            routing_key=routing_key,
+            body=content.pika_body,
+            properties=content.pika_properties,
+        )
 
     def stopConnectionRetrying(self):
-        """This will stop the factory from reconnecting
-        It is used whenever a service stop has been requested, the connectionRetry flag
-        is reset to True upon connect() call
-        """
-
+        """Stop the factory from reconnecting (reset to True on the next connect())."""
         if self.reconnectTimer and self.reconnectTimer.active():
             self.reconnectTimer.cancel()
             self.reconnectTimer = None

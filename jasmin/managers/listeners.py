@@ -8,7 +8,7 @@ from logging.handlers import TimedRotatingFileHandler
 from dateutil import parser
 from twisted.internet import defer
 from twisted.internet import reactor
-from txamqp.queue import Closed
+from pika.exceptions import ConsumerCancelled
 from smpp.pdu.operations import SubmitSM, DeliverSM
 from smpp.pdu.pdu_types import CommandStatus, DataCodingScheme, DataCodingGsmMsgClass, EsmClassGsmFeatures
 from smpp.twisted.protocol import DataHandlerResponse
@@ -16,6 +16,7 @@ from smpp.pdu.error import SMPPRequestTimoutError
 
 from jasmin.managers.configs import SMPPClientPBConfig
 from jasmin.managers.content import SubmitSmRespContent, DeliverSmContent, SubmitSmRespBillContent, DLR
+from jasmin.queues.delivery import DeliveryMessage
 from jasmin.protocols.smpp.error import *
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
 from jasmin.tools.tlv import format_tlvs_for_log
@@ -118,13 +119,33 @@ class SMPPClientSMListener:
             self.log.debug("Requeuing SubmitSmPDU[%s] without delay", msgid)
             yield self.rejectMessage(message, requeue=1)
 
-    @defer.inlineCallbacks
     def rejectMessage(self, message, requeue=0):
-        yield self.amqpBroker.chan.basic_reject(delivery_tag=message.delivery_tag, requeue=requeue)
+        msgid = message.content.properties['message-id']
+        if not self.amqpBroker.connected:
+            self.log.error("Cannot reject message, AMQP Broker is not connected !")
+            return
 
-    @defer.inlineCallbacks
+        # Reject on the channel that delivered the message. If that channel has since closed, the broker
+        # has already requeued the delivery, so there is nothing left to do.
+        try:
+            message.channel.basic_reject(delivery_tag=message.delivery_tag, requeue=requeue)
+        except Exception as e:
+            self.log.warning("Could not reject SubmitSmPDU[%s] (delivering channel likely closed): %s", msgid, e)
+
     def ackMessage(self, message):
-        yield self.amqpBroker.chan.basic_ack(message.delivery_tag)
+        msgid = message.content.properties['message-id']
+        if not self.amqpBroker.connected:
+            self.log.error("Cannot ack message, AMQP Broker is not connected !")
+            return
+
+        try:
+            message.channel.basic_ack(delivery_tag=message.delivery_tag)
+        except Exception as e:
+            self.log.warning("Could not ack SubmitSmPDU[%s] (delivering channel likely closed): %s", msgid, e)
+
+    def _on_message(self, received):
+        # Wrap pika's ReceivedMessage in the txamqp-style shim submit_sm_callback below expects.
+        return self.submit_sm_callback(DeliveryMessage(received))
 
     @defer.inlineCallbacks
     def submit_sm_callback(self, message):
@@ -137,7 +158,7 @@ class SMPPClientSMListener:
             msgid = message.content.properties['message-id']
             SubmitSmPDU = pickle.loads(message.content.body)
 
-            self.submit_sm_q.get().addCallback(self.submit_sm_callback).addErrback(self.submit_sm_errback)
+            self.submit_sm_q.get().addCallback(self._on_message).addErrback(self.submit_sm_errback)
 
             self.log.debug("Callbacked a submit_sm with a SubmitSmPDU[%s] (?): %s", msgid, SubmitSmPDU)
 
@@ -463,11 +484,11 @@ class SMPPClientSMListener:
 
     def submit_sm_errback(self, error):
         """It appears that when closing a queue with the close() method it errbacks with
-        a txamqp.queue.Closed exception, didn't find a clean way to stop consuming a queue
+        a ConsumerCancelled exception, didn't find a clean way to stop consuming a queue
         without errbacking here so this is a workaround to make it clean, it can be considered
         as a @TODO requiring knowledge of the queue api behaviour
         """
-        if error.check(Closed) is None:
+        if error.check(ConsumerCancelled) is None:
             # @todo: implement this errback
             # For info, this errback is called whenever:
             # - an error has occurred inside submit_sm_callback

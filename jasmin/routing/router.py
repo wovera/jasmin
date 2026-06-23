@@ -8,7 +8,7 @@ from logging.handlers import TimedRotatingFileHandler
 
 from twisted.internet import defer, reactor
 from twisted.spread import pb
-from txamqp.queue import Closed
+from pika.exceptions import ConsumerCancelled
 
 import jasmin
 from jasmin.routing.InterceptionTables import (MOInterceptionTable,
@@ -16,6 +16,7 @@ from jasmin.routing.InterceptionTables import (MOInterceptionTable,
                                                InvalidInterceptionTableParameterError)
 from jasmin.routing.RoutingTables import MORoutingTable, MTRoutingTable, InvalidRoutingTableParameterError
 from jasmin.routing.content import RoutedDeliverSmContent
+from jasmin.queues.delivery import DeliveryMessage
 from jasmin.tools.migrations.configuration import ConfigurationMigrator
 
 LOG_CATEGORY = "jasmin-router"
@@ -26,6 +27,8 @@ class RouterPB(pb.Avatar):
         self.config = RouterPBConfig
         self.persistenceTimer = None
         self.avatar = None
+        self.deliver_sm_chan = None  # this consumer's own channel (per-consumer channel isolates delivery tags)
+        self.bill_chan = None  # this consumer's own channel (per-consumer channel isolates delivery tags)
 
         # Set up a dedicated logger
         self.log = logging.getLogger(LOG_CATEGORY)
@@ -83,38 +86,46 @@ class RouterPB(pb.Avatar):
             self.log.info("AMQP Broker channel is ready now, let's go !")
 
         # Subscribe to deliver.sm.* queues
-        yield self.amqpBroker.chan.exchange_declare(exchange='messaging', type='topic')
         consumerTag = 'RouterPB-delivers'
         routingKey = 'deliver.sm.*'
         queueName = 'RouterPB_deliver_sm_all'  # A local queue to RouterPB
+        self.deliver_sm_chan = yield self.amqpBroker.newChannel()
+        yield self.deliver_sm_chan.exchange_declare(exchange='messaging', exchange_type='topic')
         yield self.amqpBroker.named_queue_declare(queue=queueName)
-        yield self.amqpBroker.chan.queue_bind(queue=queueName, exchange="messaging", routing_key=routingKey)
-        yield self.amqpBroker.chan.basic_consume(queue=queueName, no_ack=False, consumer_tag=consumerTag)
-        self.deliver_sm_q = yield self.amqpBroker.client.queue(consumerTag)
-        self.deliver_sm_q.get().addCallback(self.deliver_sm_callback).addErrback(self.deliver_sm_errback)
+        yield self.deliver_sm_chan.queue_bind(queue=queueName, exchange="messaging", routing_key=routingKey)
+        self.deliver_sm_q, _consumer_tag = yield self.deliver_sm_chan.basic_consume(
+            queue=queueName, auto_ack=False, consumer_tag=consumerTag)
+        self.deliver_sm_q.get().addCallback(self._on_deliver_sm).addErrback(self.deliver_sm_errback)
         self.log.info('RouterPB is consuming from routing key: %s', routingKey)
 
         # Subscribe to bill_request.submit_sm_resp.* queues
-        yield self.amqpBroker.chan.exchange_declare(exchange='billing', type='topic')
         consumerTag = 'RouterPB-billrequests'
         routingKey = 'bill_request.submit_sm_resp.*'
         queueName = 'RouterPB_bill_request_submit_sm_resp_all'  # A local queue to RouterPB
+        self.bill_chan = yield self.amqpBroker.newChannel()
+        yield self.bill_chan.exchange_declare(exchange='billing', exchange_type='topic')
         yield self.amqpBroker.named_queue_declare(queue=queueName)
-        yield self.amqpBroker.chan.queue_bind(queue=queueName, exchange="billing", routing_key=routingKey)
-        yield self.amqpBroker.chan.basic_consume(queue=queueName, no_ack=False, consumer_tag=consumerTag)
-        self.bill_request_submit_sm_resp_q = yield self.amqpBroker.client.queue(consumerTag)
+        yield self.bill_chan.queue_bind(queue=queueName, exchange="billing", routing_key=routingKey)
+        self.bill_request_submit_sm_resp_q, _consumer_tag = yield self.bill_chan.basic_consume(
+            queue=queueName, auto_ack=False, consumer_tag=consumerTag)
         self.bill_request_submit_sm_resp_q.get().addCallback(
-            self.bill_request_submit_sm_resp_callback).addErrback(
+            self._on_bill_request_submit_sm_resp).addErrback(
             self.bill_request_submit_sm_resp_errback)
         self.log.info('RouterPB is consuming from routing key: %s', routingKey)
 
-    @defer.inlineCallbacks
     def rejectMessage(self, message):
-        yield self.amqpBroker.chan.basic_reject(delivery_tag=message.delivery_tag, requeue=0)
+        # Reject on the channel that delivered the message. If that channel has since closed, the broker
+        # has already requeued the delivery, so there is nothing left to do.
+        try:
+            message.channel.basic_reject(delivery_tag=message.delivery_tag, requeue=0)
+        except Exception as e:
+            self.log.warning("Could not reject message (delivering channel likely closed): %s", e)
 
-    @defer.inlineCallbacks
     def ackMessage(self, message):
-        yield self.amqpBroker.chan.basic_ack(message.delivery_tag)
+        try:
+            message.channel.basic_ack(delivery_tag=message.delivery_tag)
+        except Exception as e:
+            self.log.warning("Could not ack message (delivering channel likely closed): %s", e)
 
     def activatePersistenceTimer(self):
         if self.persistenceTimer and self.persistenceTimer.active():
@@ -150,6 +161,9 @@ class RouterPB(pb.Avatar):
 
         self.activatePersistenceTimer()
 
+    def _on_deliver_sm(self, received):
+        return self.deliver_sm_callback(DeliveryMessage(received))
+
     @defer.inlineCallbacks
     def deliver_sm_callback(self, message):
         """This callback is a queue listener
@@ -166,7 +180,7 @@ class RouterPB(pb.Avatar):
 
         # @todo: Implement MO throttling here, same as in
         # jasmin.managers.listeners.SMPPClientSMListener.submit_sm_callback
-        self.deliver_sm_q.get().addCallback(self.deliver_sm_callback).addErrback(self.deliver_sm_errback)
+        self.deliver_sm_q.get().addCallback(self._on_deliver_sm).addErrback(self.deliver_sm_errback)
 
         # Routing
         route = self.getMORoutingTable().getRouteFor(routable)
@@ -221,16 +235,13 @@ class RouterPB(pb.Avatar):
                                               content=content)
 
     def deliver_sm_errback(self, error):
-        """It appears that when closing a queue with the close() method it errbacks with
-        a txamqp.queue.Closed exception, didnt find a clean way to stop consuming a queue
-        without errbacking here so this is a workaround to make it clean, it can be considered
-        as a @TODO requiring knowledge of the queue api behaviour
-        """
-        if error.check(Closed) is None:
-            # @todo: implement this errback
-            # For info, this errback is called whenever:
-            # - an error has occured inside deliver_sm_callback
+        # ConsumerCancelled fires when the consumer's queue is closed/cancelled (expected on teardown);
+        # anything else is a real error inside deliver_sm_callback.
+        if error.check(ConsumerCancelled) is None:
             self.log.error("Error in deliver_sm_errback: %s", error)
+
+    def _on_bill_request_submit_sm_resp(self, received):
+        return self.bill_request_submit_sm_resp_callback(DeliveryMessage(received))
 
     @defer.inlineCallbacks
     def bill_request_submit_sm_resp_callback(self, message):
@@ -243,7 +254,7 @@ class RouterPB(pb.Avatar):
                        uid, amount, bid)
 
         self.bill_request_submit_sm_resp_q.get().addCallback(
-            self.bill_request_submit_sm_resp_callback).addErrback(
+            self._on_bill_request_submit_sm_resp).addErrback(
             self.bill_request_submit_sm_resp_errback)
 
         _user = self.getUser(uid)
@@ -262,15 +273,9 @@ class RouterPB(pb.Avatar):
                 yield self.ackMessage(message)
 
     def bill_request_submit_sm_resp_errback(self, error):
-        """It appears that when closing a queue with the close() method it errbacks with
-        a txamqp.queue.Closed exception, didnt find a clean way to stop consuming a queue
-        without errbacking here so this is a workaround to make it clean, it can be considered
-        as a @TODO requiring knowledge of the queue api behaviour
-        """
-        if error.check(Closed) is None:
-            # @todo: implement this errback
-            # For info, this errback is called whenever:
-            # - an error has occured inside deliver_sm_callback
+        # ConsumerCancelled fires when the consumer's queue is closed/cancelled (expected on teardown);
+        # anything else is a real error inside bill_request_submit_sm_resp_callback.
+        if error.check(ConsumerCancelled) is None:
             self.log.error("Error in bill_request_submit_sm_resp_errback: %s", error)
             self.log.critical("User were not charged !")
 

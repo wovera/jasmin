@@ -14,6 +14,7 @@ from jasmin.protocols.smpp.services import SMPPClientService
 from jasmin.tools.migrations.configuration import ConfigurationMigrator
 from smpp.pdu.pdu_types import RegisteredDeliveryReceipt
 from smpp.twisted.protocol import SMPPSessionStates
+from jasmin.queues.delivery import DeliveryMessage
 from .configs import SMPPClientSMListenerConfig
 from .content import SubmitSmContent
 from .listeners import SMPPClientSMListener
@@ -241,20 +242,24 @@ class SMPPClientManagerPB(pb.Avatar):
             self.log.error('AMQP Broker channel is not yet ready')
             defer.returnValue(False)
 
+        # This connector's own channel isolates its delivery-tag space, so acks/rejects go back on the
+        # channel that delivered the message.
+        chan = yield self.amqpBroker.newChannel()
+
         # Fix prefetch limit per consumer to 1 to get correct throttling
-        yield self.amqpBroker.chan.basic_qos(prefetch_count=1)
+        yield chan.basic_qos(prefetch_count=1)
 
         # Declare queues
         # First declare the messaging exchange (has no effect if its already declared)
-        yield self.amqpBroker.chan.exchange_declare(exchange='messaging', type='topic')
+        yield chan.exchange_declare(exchange='messaging', exchange_type='topic')
         # submit.sm queue declaration and binding
         submit_sm_queue = 'submit.sm.%s' % c.id
         routing_key = 'submit.sm.%s' % c.id
         self.log.info('Binding %s queue to %s route_key', submit_sm_queue, routing_key)
         yield self.amqpBroker.named_queue_declare(queue=submit_sm_queue)
-        yield self.amqpBroker.chan.queue_bind(queue=submit_sm_queue,
-                                              exchange="messaging",
-                                              routing_key=routing_key)
+        yield chan.queue_bind(queue=submit_sm_queue,
+                              exchange="messaging",
+                              routing_key=routing_key)
 
         # Instanciate smpp client service manager
         serviceManager = SMPPClientService(c, self.config)
@@ -275,6 +280,7 @@ class SMPPClientManagerPB(pb.Avatar):
             'id': c.id,
             'config': c,
             'service': serviceManager,
+            'chan': chan,
             'consumer_tag': None,
             'submit_sm_q': None,
             'sm_listener': smListener})
@@ -368,31 +374,31 @@ class SMPPClientManagerPB(pb.Avatar):
         # Subscribe to submit.sm.%cid queue
         # check jasmin.queues.test.test_amqp.PublishConsumeTestCase.test_simple_publish_consume_by_topic
         submit_sm_queue = 'submit.sm.%s' % connector['id']
-        consumerTag = 'SMPPClientFactory-%s' % (connector['id'])
+
+        chan = connector['chan']
 
         try:
-            # Using the same consumerTag will prevent getting multiple consumers on the same queue
-            # This can resolve the dark hole issue #234
-
-            # Stop the queue consumer if any
+            # Cancel the current consumer (if any) first, so starting a connector twice never leaves two
+            # consumers on the same queue (#234). pika rejects re-using a just-cancelled consumer tag
+            # (DuplicateConsumerTag), so we let it assign a fresh unique tag for the new consumer.
             if connector['consumer_tag'] is not None:
                 self.log.debug('Stopping submit_sm_q consumer in connector [%s]', cid)
-                yield self.amqpBroker.chan.basic_cancel(consumer_tag=connector['consumer_tag'])
+                yield chan.basic_cancel(consumer_tag=connector['consumer_tag'])
 
             # Start a new consumer
-            yield self.amqpBroker.chan.basic_consume(queue=submit_sm_queue,
-                                                     no_ack=False, consumer_tag=consumerTag)
+            submit_sm_q, consumerTag = yield chan.basic_consume(queue=submit_sm_queue, auto_ack=False)
         except Exception as e:
             self.log.error('Error consuming from queue %s: %s', submit_sm_queue, e)
             defer.returnValue(False)
 
-        submit_sm_q = yield self.amqpBroker.client.queue(consumerTag)
         self.log.info('%s is consuming from queue: %s', consumerTag, submit_sm_queue)
 
-        # Set callbacks for every consumed message from submit_sm_queue queue
+        # Set callbacks for every consumed message from submit_sm_queue queue.
+        # The delivery is wrapped in the txamqp-style shim the listener's submit_sm_callback expects.
+        sm_listener = connector['sm_listener']
         d = submit_sm_q.get()
-        d.addCallback(connector['sm_listener'].submit_sm_callback).addErrback(
-            connector['sm_listener'].submit_sm_errback)
+        d.addCallback(lambda received: sm_listener.submit_sm_callback(DeliveryMessage(received))).addErrback(
+            sm_listener.submit_sm_errback)
 
         self.log.info('Started connector [%s]', cid)
 
@@ -421,7 +427,7 @@ class SMPPClientManagerPB(pb.Avatar):
         # Stop the queue consumer
         if connector['consumer_tag'] is not None:
             self.log.debug('Stopping submit_sm_q consumer in connector [%s]', cid)
-            yield self.amqpBroker.chan.basic_cancel(consumer_tag=connector['consumer_tag'])
+            yield connector['chan'].basic_cancel(consumer_tag=connector['consumer_tag'])
 
             # Cleaning
             self.log.debug('Cleaning objects in connector [%s]', cid)
@@ -435,7 +441,7 @@ class SMPPClientManagerPB(pb.Avatar):
         if delQueues:
             submitSmQueueName = 'submit.sm.%s' % cid
             self.log.debug('Deleting queue [%s]', submitSmQueueName)
-            yield self.amqpBroker.chan.queue_delete(queue=submitSmQueueName)
+            yield connector['chan'].queue_delete(queue=submitSmQueueName)
 
         # Reject & requeue any pending message to avoid loosing messages after
         # clearing timers

@@ -1,5 +1,5 @@
 """
-Multiple classes extending of txamqp.content.Content
+Multiple classes extending jasmin.queues.content.Content (pika-backed message bodies)
 """
 
 import pickle
@@ -9,7 +9,7 @@ from enum import Enum
 from importlib.metadata import entry_points
 
 from twisted.python import log
-from txamqp.content import Content
+from jasmin.queues.content import Content
 from smpp.pdu.pdu_types import CommandId, CommandStatus
 
 

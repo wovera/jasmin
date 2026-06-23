@@ -10,6 +10,7 @@ from logging.handlers import TimedRotatingFileHandler
 from OpenSSL import SSL
 from twisted.internet import defer, reactor, ssl
 from twisted.internet.protocol import ClientFactory
+from twisted.python.failure import Failure
 
 from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.tools.tlv import format_tlvs_for_log
@@ -495,8 +496,11 @@ class SMPPServerFactory(_SMPPServerFactory):
                 raise SubmitSmRoutingError()
 
             # Build final response
-            if not c.result:
-                self.log.error('Failed to send SubmitSmPDU to [cid:%s]', routedConnector.cid)
+            # A failed submit Deferred carries a Failure in .result, which is truthy: guard against it
+            # explicitly so an errored submit (e.g. a broker publish failure) is rejected instead of being
+            # treated as a successful submit.
+            if not c.result or isinstance(c.result, Failure):
+                self.log.error('Failed to send SubmitSmPDU to [cid:%s]: %s', routedConnector.cid, c.result)
                 raise SubmitSmRoutingError()
 
             # Otherwise, message_id is defined on ESME_ROK

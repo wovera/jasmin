@@ -10,12 +10,13 @@ from twisted.application.service import Service
 from twisted.internet import defer
 from twisted.internet import reactor
 from twisted.web.client import Agent
-from txamqp.queue import Closed
+from pika.exceptions import ConsumerCancelled
 from treq.client import HTTPClient
 from treq import text_content
 from smpp.pdu.constants import priority_flag_name_map
 from smpp.pdu.pdu_encoding import DataCodingEncoder
 
+from jasmin.queues.delivery import DeliveryMessage
 from jasmin.protocols.smpp.factory import SMPPServerFactory
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
 from jasmin.protocols.smpp.proxies import SMPPServerPBProxy
@@ -62,6 +63,7 @@ class Thrower(Service):
 
     def __init__(self, config):
         self.config = config
+        self.chan = None  # this thrower's own channel (per-consumer channel isolates delivery tags)
 
         # Check if callbacks are defined in child class ?
         if self.callback is None:
@@ -115,22 +117,20 @@ class Thrower(Service):
         else:
             self.throwing_retrials[message.content.properties['message-id']] = 1
 
+    def _on_message(self, received):
+        # Wrap pika's ReceivedMessage in the txamqp-style shim the callbacks below expect.
+        return self.callback(DeliveryMessage(received))
+
     def throwing_callback(self, message):
         # Init retrial mechanism
         self.incThrowingRetrials(message)
 
-        self.thrower_q.get().addCallback(self.callback).addErrback(self.errback)
+        self.thrower_q.get().addCallback(self._on_message).addErrback(self.errback)
 
     def throwing_errback(self, error):
-        """It appears that when closing a queue with the close() method it errbacks with
-        a txamqp.queue.Closed exception, didnt find a clean way to stop consuming a queue
-        without errbacking here so this is a workaround to make it clean, it can be considered
-        as a @TODO requiring knowledge of the queue api behaviour
-        """
-        if error.check(Closed) is None:
-            # @todo: implement this errback
-            # For info, this errback is called whenever:
-            # - an error has occured inside throwing_callback
+        # ConsumerCancelled fires when the consumer's queue is closed/cancelled (expected on teardown);
+        # anything else is a real error inside the throwing callback.
+        if error.check(ConsumerCancelled) is None:
             self.log.error("Error in throwing_errback_errback: %s", error)
 
     def clearRequeueTimer(self, msgid):
@@ -168,17 +168,16 @@ class Thrower(Service):
             self.log.info("AMQP Broker channel is ready now, let's go !")
 
         # Declare exchange, queue and start consuming to self.callback
-        yield self.amqpBroker.chan.exchange_declare(exchange=self.exchangeName,
-                                                    type='topic')
+        self.chan = yield self.amqpBroker.newChannel()
+        yield self.chan.exchange_declare(exchange=self.exchangeName,
+                                         exchange_type='topic')
         yield self.amqpBroker.named_queue_declare(queue=self.queueName)
-        yield self.amqpBroker.chan.queue_bind(queue=self.queueName,
-                                              exchange=self.exchangeName,
-                                              routing_key=self.routingKey)
-        yield self.amqpBroker.chan.basic_consume(queue=self.queueName,
-                                                 no_ack=False,
-                                                 consumer_tag=self.consumerTag)
-        self.thrower_q = yield self.amqpBroker.client.queue(self.consumerTag)
-        self.thrower_q.get().addCallback(self.callback).addErrback(self.errback)
+        yield self.chan.queue_bind(queue=self.queueName,
+                                   exchange=self.exchangeName,
+                                   routing_key=self.routingKey)
+        self.thrower_q, _consumer_tag = yield self.chan.basic_consume(
+            queue=self.queueName, auto_ack=False, consumer_tag=self.consumerTag)
+        self.thrower_q.get().addCallback(self._on_message).addErrback(self.errback)
         self.log.info('Consuming from routing key: %s', self.routingKey)
 
     @defer.inlineCallbacks
@@ -204,20 +203,26 @@ class Thrower(Service):
             self.log.debug("Requeuing Content[%s] without delay", msgid)
             yield self.rejectMessage(message, requeue=1)
 
-    @defer.inlineCallbacks
     def rejectMessage(self, message, requeue=0):
         if requeue == 0:
             # Remove retrial tracker
             self.delThrowingRetrials(message)
 
-        yield self.amqpBroker.chan.basic_reject(delivery_tag=message.delivery_tag, requeue=requeue)
+        # Reject on the channel that delivered the message. If that channel has since closed, the broker
+        # has already requeued the delivery, so there is nothing left to do.
+        try:
+            message.channel.basic_reject(delivery_tag=message.delivery_tag, requeue=requeue)
+        except Exception as e:
+            self.log.warning("Could not reject message (delivering channel likely closed): %s", e)
 
-    @defer.inlineCallbacks
     def ackMessage(self, message):
         # Remove retrial tracker
         self.delThrowingRetrials(message)
 
-        yield self.amqpBroker.chan.basic_ack(message.delivery_tag)
+        try:
+            message.channel.basic_ack(delivery_tag=message.delivery_tag)
+        except Exception as e:
+            self.log.warning("Could not ack message (delivering channel likely closed): %s", e)
 
 
 class deliverSmThrower(Thrower):

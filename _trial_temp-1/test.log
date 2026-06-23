@@ -1,0 +1,5 @@
+2026-06-22 20:50:52+0000 [-] Log opened.
+2026-06-22 20:50:52+0000 [-] --> tests.load.test_concurrent_ack_race.ConcurrentAckRaceTestCase.test_competing_consumers_ack_on_own_channels <--
+2026-06-22 20:50:52+0000 [-] Starting factory <jasmin.queues.factory.AmqpFactory object at 0xffff9e098680>
+2026-06-22 20:50:52+0000 [-] Stopping factory <jasmin.queues.factory.AmqpFactory object at 0xffff9e098680>
+2026-06-22 20:50:52+0000 [-] Main loop terminated.
