@@ -349,7 +349,9 @@ class Send(Resource):
             ########################################################
             # Send SubmitSmPDU through smpp client manager PB server
             self.log.debug("Connector '%s' is set to be a route for this SubmitSmPDU", routedConnector.cid)
-            c = self.SMPPClientManagerPB.perspective_submit_sm(
+            client_msgid = updated_request.args[b'msgid'][0].decode() if b'msgid' in updated_request.args else None
+            # the dedup path does an async Redis SETNX, so the submit no longer always resolves synchronously
+            c = yield self.SMPPClientManagerPB.perspective_submit_sm(
                 uid=user.uid,
                 cid=routedConnector.cid,
                 SubmitSmPDU=routable.pdu,
@@ -359,21 +361,19 @@ class Send(Resource):
                 dlr_url=dlr_url,
                 dlr_level=dlr_level,
                 dlr_method=dlr_method,
-                dlr_connector=routedConnector.cid)
+                dlr_connector=routedConnector.cid,
+                msgid=client_msgid)
 
-            # Build final response
-            # A failed submit Deferred carries a Failure in .result, which is truthy: guard against it
-            # explicitly so an errored submit (e.g. a broker publish failure) is rejected as a server error
-            # instead of being rendered as Success "<failure repr>" with a 200 status.
-            if not c.result or isinstance(c.result, Failure):
+            # a falsy or Failure result must never render as Success 200
+            if not c or isinstance(c, Failure):
                 self.stats.inc('server_error_count')
-                self.log.error('Failed to send SubmitSmPDU to [cid:%s]: %s', routedConnector.cid, c.result)
+                self.log.error('Failed to send SubmitSmPDU to [cid:%s]: %s', routedConnector.cid, c)
                 raise ServerError('Cannot send submit_sm, check SMPPClientManagerPB log file for details')
             else:
                 self.stats.inc('success_count')
                 self.stats.set('last_success_at', datetime.now())
-                self.log.debug('SubmitSmPDU sent to [cid:%s], result = %s', routedConnector.cid, c.result)
-                response = {'return': c.result, 'status': 200}
+                self.log.debug('SubmitSmPDU sent to [cid:%s], result = %s', routedConnector.cid, c)
+                response = {'return': c, 'status': 200}
         except HttpApiError as e:
             self.log.error("Error: %s", e)
             response = {'return': e.message, 'status': e.code}
@@ -458,7 +458,9 @@ class Send(Resource):
                       b'tags'        : {'optional': True, 'pattern': re.compile(rb'^([-a-zA-Z0-9,])*$')},
                       b'content'     : {'optional': True},
                       b'hex-content' : {'optional': True},
-                      b'custom_tlvs' : {'optional': True}}
+                      b'custom_tlvs' : {'optional': True},
+                      b'msgid'       : {'optional': True,
+                                        'pattern': re.compile(rb'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')}}
 
             if updated_request.getHeader(b'content-type') == b'application/json':
                 json_body = updated_request.content.read()

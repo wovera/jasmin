@@ -74,7 +74,7 @@ class SMPPClientManagerPBProxy(JasminPBProxy):
         return self.pb.callRemote('connector_config', cid)
 
     @ConnectedPB
-    def submit_sm(self, cid, SubmitSmPDU, uid, submit_sm_bill=None):
+    def submit_sm(self, cid, SubmitSmPDU, uid, submit_sm_bill=None, msgid=None):
         if not isinstance(SubmitSmPDU, SubmitSM):
             raise Exception("SubmitSmPDU is not an instance of SubmitSm")
         if submit_sm_bill is not None and not isinstance(submit_sm_bill, SubmitSmBill):
@@ -103,4 +103,5 @@ class SMPPClientManagerPBProxy(JasminPBProxy):
             SubmitSmPDU=self.pickle(SubmitSmPDU),
             submit_sm_bill=submit_sm_bill,
             priority=priority_flag,
-            validity_period=validity_period)
+            validity_period=validity_period,
+            msgid=msgid)

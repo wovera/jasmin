@@ -14,6 +14,7 @@ from twisted.python.failure import Failure
 
 from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.tools.tlv import format_tlvs_for_log
+from jasmin.tools.jitter import jittered
 from smpp.twisted.protocol import DataHandlerResponse, SMPPSessionStates
 from smpp.twisted.server import SMPPBindManager as _SMPPBindManager
 from smpp.twisted.server import SMPPServerFactory as _SMPPServerFactory
@@ -106,10 +107,9 @@ class SMPPClientFactory(ClientFactory):
         self.log.error("Connection failed. Reason: %s", str(reason))
 
         if self.config.reconnectOnConnectionFailure and self.connectionRetry:
-            self.log.info("Reconnecting after %d seconds ...",
-                          self.config.reconnectOnConnectionFailureDelay)
-            self.reconnectTimer = reactor.callLater(
-                self.config.reconnectOnConnectionFailureDelay, self.reConnect, connector)
+            delay = jittered(self.config.reconnectOnConnectionFailureDelay)
+            self.log.info("Reconnecting after %.1f seconds ...", delay)
+            self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:
             self.connectDeferred.errback(reason)
             self.exitDeferred.callback(None)
@@ -121,10 +121,9 @@ class SMPPClientFactory(ClientFactory):
         self.log.error("Connection lost. Reason: %s", str(reason))
 
         if self.config.reconnectOnConnectionLoss and self.connectionRetry:
-            self.log.info("Reconnecting after %d seconds ...",
-                          self.config.reconnectOnConnectionLossDelay)
-            self.reconnectTimer = reactor.callLater(
-                self.config.reconnectOnConnectionLossDelay, self.reConnect, connector)
+            delay = jittered(self.config.reconnectOnConnectionLossDelay)
+            self.log.info("Reconnecting after %.1f seconds ...", delay)
+            self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:
             self.exitDeferred.callback(None)
             self.log.info("Exiting.")

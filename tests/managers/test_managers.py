@@ -67,6 +67,7 @@ class SMPPClientPBTestCase(TestCase):
 
         # Launch the client manager server
         pbRoot = SMPPClientManagerPB(self.SMPPClientPBConfigInstance)
+        self.clientManagerPB = pbRoot
 
         yield pbRoot.addAmqpBroker(self.amqpBroker)
         p = portal.Portal(JasminPBRealm(pbRoot))
@@ -986,6 +987,27 @@ class ClientConnectorSubmitSmRetrialTestCases(SMSCSimulatorRecorder):
         receivedSubmits = self.SMSCPort.factory.lastClient.submitRecords
         # By default, ESME_RSYSERR is retried 2 times in 70s
         self.assertEqual(len(receivedSubmits), 2)
+
+    @defer.inlineCallbacks
+    def test_retryable_error_publishes_dlr_only_on_final_outcome(self):
+        self.amqpBroker.publish = Mock(wraps=self.amqpBroker.publish)
+        yield self.connect('127.0.0.1', self.pbPort)
+        yield self.add(self.defaultConfig)
+        yield self.start(self.defaultConfig.id)
+        yield waitFor(2)
+
+        self.SubmitSmPDU.params['short_message'] = 'test_error: ESME_RSYSERR'
+        yield self.submit_sm(self.defaultConfig.id, self.SubmitSmPDU, self.SubmitSmBill.user.uid)
+
+        yield waitFor(70)
+        yield self.stop(self.defaultConfig.id)
+        yield waitFor(2)
+
+        dlr_publishes = [call for call in self.amqpBroker.publish.call_args_list
+                         if call.kwargs.get('routing_key') == 'dlr.submit_sm_resp']
+        # A retried message emits one submit_sm_resp DLR: the terminal one once retries are exhausted,
+        # never one per retryable attempt (which would evict the correlation map mid-flight).
+        self.assertEqual(len(dlr_publishes), 1)
 
     @defer.inlineCallbacks
     def test_ESME_RREPLACEFAIL(self):

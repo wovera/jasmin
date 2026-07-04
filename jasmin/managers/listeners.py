@@ -17,6 +17,7 @@ from smpp.pdu.error import SMPPRequestTimoutError
 from jasmin.managers.configs import SMPPClientPBConfig
 from jasmin.managers.content import SubmitSmRespContent, DeliverSmContent, SubmitSmRespBillContent, DLR
 from jasmin.queues.delivery import DeliveryMessage
+from jasmin.tools.jitter import jittered
 from jasmin.protocols.smpp.error import *
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
 from jasmin.tools.tlv import format_tlvs_for_log
@@ -101,6 +102,7 @@ class SMPPClientSMListener:
             else:
                 requeue_delay = self.SMPPClientFactory.config.requeue_delay
 
+            requeue_delay = jittered(requeue_delay)
             self.log.debug("Requeuing SubmitSmPDU[%s] in %s seconds",
                            msgid, requeue_delay)
 
@@ -172,23 +174,15 @@ class SMPPClientSMListener:
                 self.qos_last_submit_sm_at = datetime(1970, 1, 1)
 
             if self.SMPPClientFactory.config.submit_sm_throughput > 0:
-                # QoS throttling
-                qos_throughput_second = 1 / float(self.SMPPClientFactory.config.submit_sm_throughput)
-                qos_throughput_ysecond_td = timedelta(microseconds=qos_throughput_second * 1000000)
-                qos_delay = datetime.now() - self.qos_last_submit_sm_at
-                if qos_delay < qos_throughput_ysecond_td:
-                    qos_slow_down = float((qos_throughput_ysecond_td - qos_delay).microseconds) / 1000000
-                    # We're faster than submit_sm_throughput,
-                    # slow down before taking a new message from the queue
+                qos_slow_down = qos.throttle_delay(
+                    self.SMPPClientFactory.config.submit_sm_throughput,
+                    self.qos_last_submit_sm_at,
+                    datetime.now())
+                if qos_slow_down > 0:
                     self.log.debug(
-                        "QoS: submit_sm_callback faster (%s) than throughput (%s), slowing down %ss (requeuing).",
-                        qos_delay, qos_throughput_ysecond_td, qos_slow_down)
-
-                    # New QoS controller (>=0.10.13):
-                    # Will pause for a delay then allow handling the message normally
-                    # This will avoid impacting resources by requeuing on rabbitmq
+                        "QoS: submit_sm_callback faster than throughput (%s/s), slowing down %ss.",
+                        self.SMPPClientFactory.config.submit_sm_throughput, qos_slow_down)
                     yield qos.slow_down(qos_slow_down)
-
                 self.qos_last_submit_sm_at = datetime.now()
 
             # Verify if message is a SubmitSm PDU
@@ -212,11 +206,11 @@ class SMPPClientSMListener:
             if self.SMPPClientFactory.smpp is None:
                 created_at = parser.parse(message.content.properties['headers']['created_at'])
                 msgAge = datetime.now() - created_at
-                if msgAge.seconds > self.config.submit_max_age_smppc_not_ready:
+                if msgAge.total_seconds() > self.config.submit_max_age_smppc_not_ready:
                     self.log.error(
                         "SMPPC [cid:%s] is not connected: Discarding (#%s) SubmitSmPDU[%s], over-aged %s seconds.",
                         self.SMPPClientFactory.config.id, self.submit_retrials[msgid],
-                        msgid, msgAge.seconds)
+                        msgid, msgAge.total_seconds())
                     yield self.rejectMessage(message)
                     defer.returnValue(False)
                 else:
@@ -227,7 +221,7 @@ class SMPPClientSMListener:
                     self.log.error(
                         "SMPPC [cid:%s] is not connected: Requeuing (#%s) SubmitSmPDU[%s]%s, aged %s seconds.",
                         self.SMPPClientFactory.config.id, self.submit_retrials[msgid],
-                        msgid, delay_str, msgAge.seconds)
+                        msgid, delay_str, msgAge.total_seconds())
                     yield self.rejectAndRequeueMessage(message,
                                                        delay=self.config.submit_retrial_delay_smppc_not_ready)
                     defer.returnValue(False)
@@ -236,11 +230,11 @@ class SMPPClientSMListener:
             if self.SMPPClientFactory.smpp.isBound() is False:
                 created_at = parser.parse(message.content.properties['headers']['created_at'])
                 msgAge = datetime.now() - created_at
-                if msgAge.seconds > self.config.submit_max_age_smppc_not_ready:
+                if msgAge.total_seconds() > self.config.submit_max_age_smppc_not_ready:
                     self.log.error(
                         "SMPPC [cid:%s] is not bound: Discarding (#%s) SubmitSmPDU[%s], over-aged %s seconds.",
                         self.SMPPClientFactory.config.id, self.submit_retrials[msgid],
-                        msgid, msgAge.seconds)
+                        msgid, msgAge.total_seconds())
                     yield self.rejectMessage(message)
                     defer.returnValue(False)
                 else:
@@ -443,16 +437,18 @@ class SMPPClientSMListener:
                 # ACK the message in queue, this will remove it from the queue
                 yield self.ackMessage(amqpMessage)
 
-            # Send DLR to DLRLookup
-            # Note: use r.response (the wrapper returned by sendDataRequest),
-            # not _pdu.response — a SubmitSM request PDU does not carry a
-            # .response attribute for single-part (non-chained) submits.
-            if r.response.status == CommandStatus.ESME_ROK:
-                dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status,
-                          smpp_msgid=r.response.params['message_id'])
-            else:
-                dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status)
-            yield self.amqpBroker.publish(exchange='messaging', routing_key='dlr.submit_sm_resp', content=dlr)
+            # Publish the DLR only on a final outcome: a retryable error is not terminal, and a premature
+            # error receipt would evict the dlr: correlation map (dlr.py deletes it on any non-ROK), losing
+            # the eventual delivery receipt after a successful retry.
+            if not will_be_retried:
+                # Use r.response (the wrapper returned by sendDataRequest), not _pdu.response: a SubmitSM
+                # request PDU carries no .response attribute for single-part (non-chained) submits.
+                if r.response.status == CommandStatus.ESME_ROK:
+                    dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status,
+                              smpp_msgid=r.response.params['message_id'])
+                else:
+                    dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status)
+                yield self.amqpBroker.publish(exchange='messaging', routing_key='dlr.submit_sm_resp', content=dlr)
 
             # Bill will be charged by bill_request.submit_sm_resp.UID queue consumer
             if total_bill_amount > 0:
@@ -784,11 +780,13 @@ class SMPPClientSMListener:
                             'Invalid RC found while receiving part of long DeliverSm [queue-msgid:%s], MSG IS LOST !',
                             msgid)
                     else:
-                        # Save it to redis
-                        hashKey = "longDeliverSm:%s:%s:%s" % (
+                        # source_addr is in the key: for MO the destination is our shared shortcode, so senders
+                        # with colliding ref numbers would otherwise interleave into one hash.
+                        hashKey = "longDeliverSm:%s:%s:%s:%s" % (
                             self.SMPPClientFactory.config.id,
                             msg_ref_num,
-                            routable.pdu.params['destination_addr'])
+                            routable.pdu.params['destination_addr'],
+                            routable.pdu.params['source_addr'])
                         hashValues = {'pdu': routable.pdu,
                                       'total_segments': total_segments,
                                       'msg_ref_num': msg_ref_num,

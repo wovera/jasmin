@@ -1,4 +1,5 @@
 import sys
+import json
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
@@ -10,6 +11,7 @@ from txredisapi import ConnectionError
 from smpp.pdu.pdu_types import RegisteredDeliveryReceipt
 
 from jasmin.managers.content import DLRContentForHttpapi, DLRContentForSmpps
+from jasmin.queues.content import Content
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.tools.singleton import Singleton
 from jasmin.tools import to_enum
@@ -196,6 +198,34 @@ class DLRLookup:
             self.log.error("Error in dlr_callback_dispatcher: %s", error)
 
     @defer.inlineCallbacks
+    def forward_outcome(self, msgid, level, message_state='', command_status='', err='',
+                        id_smsc='', sub='', dlvrd='', submit_date='', done_date='',
+                        connector='', will_be_retried=False, discard_reason=None):
+        if not self.config.dlr_forward_queue:
+            return
+
+        payload = {
+            'msgid': msgid,
+            'level': level,
+            'message_state': message_state,
+            'command_status': command_status,
+            'err': err,
+            'id_smsc': id_smsc,
+            'sub': sub,
+            'dlvrd': dlvrd,
+            'submit_date': submit_date,
+            'done_date': done_date,
+            'connector': connector,
+            'will_be_retried': will_be_retried,
+            'discard_reason': discard_reason,
+        }
+        # No message-id: one msgid spans several receipts, so it does not identify the AMQP envelope.
+        content = Content(
+            json.dumps(payload),
+            properties={'content-type': 'application/json', 'delivery-mode': 2})
+        yield self.amqpBroker.publish(exchange='', routing_key=self.config.dlr_forward_queue, content=content)
+
+    @defer.inlineCallbacks
     def submit_sm_resp_dlr_callback(self, message):
         msgid = message.content.properties['message-id']
         dlr_status = message.content.body
@@ -241,6 +271,13 @@ class DLRLookup:
                                                                                dlr_level=1,
                                                                                dlr_connector=dlr_connector,
                                                                                method=dlr_method))
+
+                    # id_smsc (the SMSC id) is present only on ESME_ROK.
+                    yield self.forward_outcome(
+                        msgid, level=1,
+                        command_status=dlr_status,
+                        id_smsc=message.content.properties['headers'].get('smpp_msgid', ''),
+                        connector=dlr_connector)
 
                     # DLR request is removed if:
                     # - If level 1 is requested (SMSC level only)
@@ -400,6 +437,17 @@ class DLRLookup:
                                                                                err=pdu_dlr_err,
                                                                                text=pdu_dlr_text,
                                                                                method=dlr_method))
+
+                    yield self.forward_outcome(
+                        submit_sm_queue_id, level=2,
+                        message_state=pdu_dlr_status,
+                        err=pdu_dlr_err,
+                        id_smsc=msgid,
+                        sub=pdu_dlr_sub,
+                        dlvrd=pdu_dlr_dlvrd,
+                        submit_date=pdu_dlr_sdate,
+                        done_date=pdu_dlr_ddate,
+                        connector=pdu_dlr_id)
 
                     if pdu_dlr_status in final_states:
                         self.log.debug('Removing HTTP dlr map for msgid[%s]', submit_sm_queue_id)

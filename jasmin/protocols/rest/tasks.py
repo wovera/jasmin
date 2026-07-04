@@ -4,6 +4,7 @@ import requests
 from celery import Celery, Task
 from datetime import datetime, timedelta
 
+from jasmin.tools import qos
 from .config import RestAPIForJasminConfig
 
 RestAPIForJasminConfigInstance = RestAPIForJasminConfig()
@@ -30,16 +31,13 @@ def httpapi_send(self, batch_id, batch_config, message_params, config):
     """Calls Jasmin's /send http api, if we have errback_url and callback_url in batch_config then
     will callback those urls asynchronously to inform user of batch progression"""
     try:
-        slow_down_seconds = 0
-        # Shall we do QoS control ?
-        if self.worker_tracker['throughput'] > 0:
-            qos_throughput_second = 1 / float(self.worker_tracker['throughput'])
-            qos_throughput_ysecond_td = timedelta(microseconds=qos_throughput_second * 1000000)
-            qos_delay = datetime.now() - self.worker_tracker['last_req_at']
-            if qos_delay < qos_throughput_ysecond_td:
-                slow_down_seconds = float((qos_throughput_ysecond_td - qos_delay).microseconds) / 1000000
-                logger.debug('QoS: slowing down request by %s/s to meet configured throughput per worker: %s/s',
-                             slow_down_seconds, self.worker_tracker['throughput'])
+        slow_down_seconds = qos.throttle_delay(
+            self.worker_tracker['throughput'],
+            self.worker_tracker['last_req_at'],
+            datetime.now())
+        if slow_down_seconds > 0:
+            logger.debug('QoS: slowing down request by %ss to meet configured throughput per worker: %s/s',
+                         slow_down_seconds, self.worker_tracker['throughput'])
 
         # Shall we sleep ?
         if slow_down_seconds > 0:

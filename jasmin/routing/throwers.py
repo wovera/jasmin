@@ -16,6 +16,7 @@ from treq import text_content
 from smpp.pdu.constants import priority_flag_name_map
 from smpp.pdu.pdu_encoding import DataCodingEncoder
 
+from jasmin.queues.content import Content
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.protocols.smpp.factory import SMPPServerFactory
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
@@ -239,6 +240,30 @@ class deliverSmThrower(Thrower):
         Thrower.__init__(self, config)
 
     @defer.inlineCallbacks
+    def forward_mo(self, msgid, args):
+        def _text(v):
+            return v.decode(errors='replace') if isinstance(v, (bytes, bytearray)) else v
+
+        content = args.get('content')
+        coding = args.get('coding')
+        payload = {
+            'id': msgid,
+            'from': _text(args.get('from')),
+            'to': _text(args.get('to')),
+            'origin-connector': _text(args.get('origin-connector')),
+            # coding is a single data_coding byte; expose the integer.
+            'coding': coding[0] if isinstance(coding, (bytes, bytearray)) else coding,
+            'content': content if isinstance(content, str) else None,
+            'binary': _text(args.get('binary')),
+            'tlv_params': args.get('tlv_params'),
+            'custom_tlvs': args.get('custom_tlvs'),
+        }
+        forward = Content(
+            json.dumps(payload),
+            properties={'content-type': 'application/json', 'delivery-mode': 2})
+        yield self.amqpBroker.publish(exchange='', routing_key=self.config.mo_forward_queue, content=forward)
+
+    @defer.inlineCallbacks
     def http_deliver_sm_callback(self, message):
         msgid = message.content.properties['message-id']
         route_type = message.content.properties['headers']['route-type']
@@ -328,6 +353,12 @@ class deliverSmThrower(Thrower):
                         'tag': tag, 'length': length, 'type': value_type, 'value': value})
             if custom_tlvs_data:
                 args['custom_tlvs'] = json.dumps(custom_tlvs_data)
+
+        # A configured forward queue makes this a JSON forwarder: publish the MO and ack, skipping the HTTP throw.
+        if self.config.mo_forward_queue:
+            yield self.forward_mo(msgid, args)
+            yield self.ackMessage(message)
+            defer.returnValue(None)
 
         counter = 0
         for dc in dcs:

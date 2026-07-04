@@ -7,6 +7,11 @@ sed -i "/\[redis-client\]/,/port=/  s/port=.*/port=$REDIS_CLIENT_PORT/" ${CONFIG
 sed -i "/\[amqp-broker\]/,/host=/  s/host=.*/host=$AMQP_BROKER_HOST/" ${CONFIG_PATH}/jasmin.cfg
 sed -i "/\[amqp-broker\]/,/port=/  s/port=.*/port=$AMQP_BROKER_PORT/" ${CONFIG_PATH}/jasmin.cfg
 
+# Optional JSON outcome forwarder queue (empty = disabled)
+if [ -n "${DLR_FORWARD_QUEUE:-}" ]; then
+  sed -i "/\[dlr\]/a dlr_forward_queue=$DLR_FORWARD_QUEUE" ${CONFIG_PATH}/jasmin.cfg
+fi
+
 echo 'Cleaning lock files'
 rm -f /tmp/*.lock
 

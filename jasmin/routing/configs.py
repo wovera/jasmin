@@ -50,6 +50,8 @@ class deliverSmThrowerConfig(ConfigFile):
         self.retry_delay = self._getint('deliversm-thrower', 'retry_delay', 30)
         self.max_retries = self._getint('deliversm-thrower', 'max_retries', 3)
 
+        self.mo_forward_queue = self._get('deliversm-thrower', 'mo_forward_queue', '')
+
         # Logging
         self.log_level = logging.getLevelName(self._get('deliversm-thrower', 'log_level', 'INFO'))
         self.log_file = self._get(

@@ -553,7 +553,7 @@ class SMPPClientManagerPB(pb.Avatar):
     @defer.inlineCallbacks
     def perspective_submit_sm(self, uid, cid, SubmitSmPDU, submit_sm_bill, priority=1, validity_period=None,
                               pickled=True, dlr_url=None, dlr_level=1, dlr_method='POST', dlr_connector=None,
-                              source_connector='httpapi'):
+                              source_connector='httpapi', msgid=None):
         """This will enqueue a submit_sm to a connector
         """
         connector = self.getConnector(cid)
@@ -586,6 +586,19 @@ class SMPPClientManagerPB(pb.Avatar):
             PickledSubmitSmPDU = SubmitSmPDU
             SubmitSmPDU = pickle.loads(PickledSubmitSmPDU)
 
+        idem_key = None
+        if msgid is not None:
+            if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
+                # fail closed: without the dedup store a caller retry could double-submit to the wire
+                self.log.error('Idempotent submit [msgid:%s] refused: Redis not connected', msgid)
+                defer.returnValue(False)
+            idem_key = "idem:%s" % msgid
+            claimed = yield self.redisClient.set(
+                idem_key, '1', expire=connector['config'].dlr_expiry, only_if_not_exists=True)
+            if not claimed:
+                self.log.info('Idempotent submit [msgid:%s] deduplicated; replaying original accept', msgid)
+                defer.returnValue(msgid)
+
         # Publishing a pickled PDU
         self.log.debug('Publishing SubmitSmPDU with routing_key=%s, priority=%s', pubQueueName, priority)
         c = SubmitSmContent(
@@ -595,9 +608,16 @@ class SMPPClientManagerPB(pb.Avatar):
             submit_sm_bill=submit_sm_bill,
             priority=priority,
             expiration=validity_period,
+            msgid=msgid,
             source_connector='httpapi' if source_connector == 'httpapi' else 'smppsapi',
             destination_cid=cid)
-        yield self.amqpBroker.publish(exchange='messaging', routing_key=pubQueueName, content=c)
+        try:
+            yield self.amqpBroker.publish(exchange='messaging', routing_key=pubQueueName, content=c)
+        except Exception:
+            # release the claim on publish failure so a retry re-enqueues instead of replaying a never-queued accept
+            if idem_key is not None:
+                yield self.redisClient.delete(idem_key)
+            raise
 
         if source_connector == 'httpapi' and dlr_url is not None:
             # Enqueue DLR request in redis 'dlr' key if it is a httpapi request

@@ -64,7 +64,7 @@ class ConfigurationMigrator:
         # Parse header and get version & date
         match = _REGEX_HEADER.match(header)
         if match is None:
-            raise ValueError('Invalid Jasmin configuration header format:' % header)
+            raise ValueError('Invalid Jasmin configuration header format: %s' % header)
         self.date = date_parse(match.groupdict()['date'])
         self.version = match.groupdict()['release_version']
         self.log.debug('[%s] @%s/%s', self.context, self.date, self.version)

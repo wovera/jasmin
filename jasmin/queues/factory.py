@@ -8,6 +8,7 @@ from twisted.internet import defer, reactor
 from twisted.internet.protocol import ClientFactory
 
 from jasmin.queues.protocol import AmqpProtocol
+from jasmin.tools.jitter import jittered
 
 LOG_CATEGORY = "jasmin-amqp-factory"
 
@@ -76,9 +77,9 @@ class AmqpFactory(ClientFactory):
         self.connected = False
 
         if self.config.reconnectOnConnectionFailure and self.connectionRetry:
-            self.log.info("Reconnecting after %d seconds ...", self.config.reconnectOnConnectionFailureDelay)
-            self.reconnectTimer = reactor.callLater(self.config.reconnectOnConnectionFailureDelay,
-                                                    self.reConnect, connector)
+            delay = jittered(self.config.reconnectOnConnectionFailureDelay)
+            self.log.info("Reconnecting after %.1f seconds ...", delay)
+            self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:
             if self.connectDeferred is not None and not self.connectDeferred.called:
                 self.connectDeferred.errback(reason)
@@ -95,9 +96,9 @@ class AmqpFactory(ClientFactory):
         self.chan = None
 
         if self.config.reconnectOnConnectionLoss and self.connectionRetry:
-            self.log.info("Reconnecting after %d seconds ...", self.config.reconnectOnConnectionLossDelay)
-            self.reconnectTimer = reactor.callLater(self.config.reconnectOnConnectionLossDelay,
-                                                    self.reConnect, connector)
+            delay = jittered(self.config.reconnectOnConnectionLossDelay)
+            self.log.info("Reconnecting after %.1f seconds ...", delay)
+            self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:
             self.exitDeferred.callback(self)
             self.log.info("Exiting.")

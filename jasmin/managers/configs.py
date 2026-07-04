@@ -92,6 +92,8 @@ class DLRLookupConfig(ConfigFile):
         self.smpp_receipt_on_success_submit_sm_resp = self._getbool('dlr', 'smpp_receipt_on_success_submit_sm_resp',
                                                                     False)
 
+        self.dlr_forward_queue = self._get('dlr', 'dlr_forward_queue', '')
+
         self.log_level = logging.getLevelName(self._get('dlr', 'log_level', 'INFO'))
         self.log_file = self._get('dlr', 'log_file', '%s/messages.log' % LOG_PATH)
         self.log_rotate = self._get('dlr', 'log_rotate', 'midnight')
