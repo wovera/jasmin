@@ -517,7 +517,7 @@ class ManualDeliveryReceiptHappySMSC(HappySMSC):
                     stat,
                     submitsm_pdu.params['short_message'][:20]
                 ),
-                message_state=message_state_map[stat],
+                message_state=message_state_map.get(stat, MessageState.UNKNOWN),
                 receipted_message_id=str(_id),
             )
             return self.trigger_deliver_sm(pdu)
@@ -526,7 +526,7 @@ class ManualDeliveryReceiptHappySMSC(HappySMSC):
             pdu = DataSM(
                 source_addr=submitsm_pdu.params['source_addr'],
                 destination_addr=submitsm_pdu.params['destination_addr'],
-                message_state=message_state_map[stat],
+                message_state=message_state_map.get(stat, MessageState.UNKNOWN),
                 receipted_message_id=str(_id),
             )
             return self.trigger_data_sm(pdu)

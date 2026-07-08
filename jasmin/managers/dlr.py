@@ -31,6 +31,10 @@ class DLRMapNotFound(Exception):
     """Raised if no dlr is found in Redis db"""
 
 
+class ForwardError(Exception):
+    """Raised when the broker does not confirm the outcome forward (Nack / unroutable / channel closed)."""
+
+
 class DLRLookup:
     """
     Will consume dlr pdus (submit_sm, deliver_sm or data_sm), lookup for matching dlr maps in redis db
@@ -41,6 +45,7 @@ class DLRLookup:
         self.pid = config.pid
         self.q = None
         self.chan = None  # this consumer's own channel (per-consumer channel isolates delivery tags)
+        self.forward_chan = None  # dedicated publisher-confirms channel for the outcome forward
         self.config = config
         self.amqpBroker = amqpBroker
         self.redisClient = redisClient
@@ -77,6 +82,11 @@ class DLRLookup:
         self.q, _consumer_tag = yield self.chan.basic_consume(
             queue=queueName, auto_ack=False, consumer_tag=consumerTag)
         self.setup_callbacks(self.q)
+
+        # A separate channel in confirm mode: the inbound DLR is acked only after the broker confirms the forward,
+        # so the receipt is never lost. Kept off the consumer/control channels, whose publishes must stay unconfirmed.
+        self.forward_chan = yield self.amqpBroker.newChannel()
+        yield self.forward_chan.confirm_delivery()
 
     def clearRequeueTimer(self, msgid):
         if msgid in self.requeue_timers:
@@ -223,7 +233,17 @@ class DLRLookup:
         content = Content(
             json.dumps(payload),
             properties={'content-type': 'application/json', 'delivery-mode': 2})
-        yield self.amqpBroker.publish(exchange='', routing_key=self.config.dlr_forward_queue, content=content)
+        try:
+            # mandatory + confirms: a Nack or an unroutable target errbacks, and any failure here means the
+            # receipt was not durably taken, so surface it for the caller to requeue instead of acking a loss.
+            yield self.forward_chan.basic_publish(
+                exchange='',
+                routing_key=self.config.dlr_forward_queue,
+                body=content.pika_body,
+                properties=content.pika_properties,
+                mandatory=True)
+        except Exception as e:
+            raise ForwardError(str(e))
 
     @defer.inlineCallbacks
     def submit_sm_resp_dlr_callback(self, message):
@@ -367,6 +387,10 @@ class DLRLookup:
         except DLRMapNotFound as e:
             self.log.debug('[msgid:%s] DLRMapNotFound: %s', msgid, e)
             yield self.rejectMessage(message)
+        except ForwardError as e:
+            # A delivery outcome must never be dropped: requeue with delay until the broker confirms the forward.
+            self.log.error('[msgid:%s] ForwardError (requeuing): %s', msgid, e)
+            yield self.rejectAndRequeueMessage(message)
         except Exception as e:
             self.log.error('[msgid:%s] Unknown error (%s): %s', msgid, type(e), e)
             yield self.rejectMessage(message)
@@ -515,6 +539,10 @@ class DLRLookup:
             else:
                 self.log.error('[msgid:%s] (final) DLRMapNotFound: %s', msgid, e)
                 yield self.rejectMessage(message)
+        except ForwardError as e:
+            # A delivery outcome must never be dropped: requeue with delay until the broker confirms the forward.
+            self.log.error('[msgid:%s] ForwardError (requeuing): %s', msgid, e)
+            yield self.rejectAndRequeueMessage(message)
         except Exception as e:
             self.log.error('[msgid:%s] Unknown error (%s): %s', msgid, type(e), e)
             yield self.rejectMessage(message)

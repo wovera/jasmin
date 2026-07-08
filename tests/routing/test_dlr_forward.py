@@ -41,6 +41,16 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         defer.returnValue(json.loads(result.body))
 
     @defer.inlineCallbacks
+    def _drain_forwards(self):
+        out = []
+        while True:
+            r = yield self._get_forward()
+            if r is None:
+                break
+            out.append(r)
+        defer.returnValue(out)
+
+    @defer.inlineCallbacks
     def _send(self, dlr_level, dlr_url=True):
         yield self.connect('127.0.0.1', self.pbPort)
         yield self.prepareRoutingsAndStartConnector()
@@ -110,6 +120,62 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         self.assertEqual(recs[2]['msgid'], msgId)
         self.assertEqual(recs[2]['message_state'], 'DELIVRD')
         self.assertIsNone(self.AckServerResource.last_request)  # no HTTP throw for a url-less request
+
+    @defer.inlineCallbacks
+    def test_forward_survives_target_queue_outage(self):
+        # At-least-once: while the forward target is unroutable the receipt is requeued (not acked away) and lands
+        # once the queue exists again — the inbound DLR is settled only after the broker confirms the forward.
+        self.dlrlookup.config.dlr_lookup_retry_delay = 1
+        yield self.amqpBroker.chan.queue_delete(queue=self.forward_queue)
+
+        msgId = yield self._send(dlr_level=1, dlr_url=False)
+        yield waitFor(2)  # level1 forward attempted while the target is absent -> unroutable -> requeued
+
+        yield self.amqpBroker.chan.queue_declare(queue=self.forward_queue, durable=True)
+
+        r = None
+        for _ in range(6):
+            yield waitFor(1)
+            r = yield self._get_forward()
+            if r is not None:
+                break
+        yield self.stopSmppClientConnectors()
+
+        self.assertIsNotNone(r)  # receipt survived the outage
+        self.assertEqual(r['msgid'], msgId)
+        self.assertEqual(r['level'], 1)
+
+    @defer.inlineCallbacks
+    def test_unknown_msgid_receipt_is_dropped_and_pipeline_survives(self):
+        # A spurious receipt for a message the engine never submitted (an unmapped smpp id) is not forwarded, and it
+        # must not stall the DLR consumer: a following valid receipt still forwards.
+        msgId = yield self._send(dlr_level=3)
+        yield waitFor(2)  # level1 (submit_sm_resp)
+        yield self.SMSCPort.factory.lastClient.trigger_DLR(_id='0000000000', stat='DELIVRD')
+        yield waitFor(1)
+        yield self.SMSCPort.factory.lastClient.trigger_DLR(stat='DELIVRD')
+        yield waitFor(1)
+        yield self.stopSmppClientConnectors()
+        self.dlrlookup.clearRequeueTimers()  # the unmapped receipt's retry timer would else dirty the reactor
+
+        level2 = [f for f in (yield self._drain_forwards()) if f['level'] == 2]
+        self.assertEqual(len(level2), 1)  # only the mapped receipt forwarded; the spurious one dropped
+        self.assertEqual(level2[0]['msgid'], msgId)
+
+    @defer.inlineCallbacks
+    def test_unrecognized_state_is_forwarded_as_unknown_not_fabricated(self):
+        # A receipt whose carrier state the engine does not recognize is forwarded as UNKNOWN (never dropped, never
+        # crashed, never a fabricated state), leaving the consumer to decide how to read it.
+        msgId = yield self._send(dlr_level=3)
+        yield waitFor(2)  # level1 (submit_sm_resp)
+        yield self.SMSCPort.factory.lastClient.trigger_DLR(stat='WEIRD')
+        yield waitFor(1)
+        yield self.stopSmppClientConnectors()
+
+        level2 = [f for f in (yield self._drain_forwards()) if f['level'] == 2]
+        self.assertEqual(len(level2), 1)
+        self.assertEqual(level2[0]['msgid'], msgId)
+        self.assertEqual(level2[0]['message_state'], 'UNKNOWN')
 
     @defer.inlineCallbacks
     def test_disabled_when_queue_unset(self):
