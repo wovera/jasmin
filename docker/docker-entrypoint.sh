@@ -12,6 +12,12 @@ if [ -n "${DLR_FORWARD_QUEUE:-}" ]; then
   sed -i "/\[dlr\]/a dlr_forward_queue=$DLR_FORWARD_QUEUE" ${CONFIG_PATH}/jasmin.cfg
 fi
 
+# Optional internal billing toggle (unset = Jasmin's built-in default of enabled)
+if [ -n "${BILLING_FEATURE:-}" ]; then
+  sed -i "/\[smpp-server\]/a billing_feature=$BILLING_FEATURE" ${CONFIG_PATH}/jasmin.cfg
+  sed -i "/\[http-api\]/a billing_feature=$BILLING_FEATURE" ${CONFIG_PATH}/jasmin.cfg
+fi
+
 echo 'Cleaning lock files'
 rm -f /tmp/*.lock
 

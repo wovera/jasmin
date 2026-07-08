@@ -619,8 +619,9 @@ class SMPPClientManagerPB(pb.Avatar):
                 yield self.redisClient.delete(idem_key)
             raise
 
-        if source_connector == 'httpapi' and dlr_url is not None:
-            # Enqueue DLR request in redis 'dlr' key if it is a httpapi request
+        if source_connector == 'httpapi' and dlr_level in [1, 2, 3]:
+            # A requested receipt (dlr_level > 0) enqueues the redis 'dlr' map regardless of dlr_url: the map also
+            # drives the AMQP outcome forwarder, which must fire for a url-less receipt request too.
             if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
                 self.log.warning("DLR is not enqueued for SubmitSmPDU [msgid:%s], RC is not connected.",
                               c.properties['message-id'])
@@ -633,7 +634,7 @@ class SMPPClientManagerPB(pb.Avatar):
                 # Set values and callback expiration setting
                 hashKey = "dlr:%s" % (c.properties['message-id'])
                 hashValues = {'sc': 'httpapi',
-                              'url': dlr_url,
+                              'url': dlr_url if dlr_url is not None else '',
                               'level': dlr_level,
                               'method': dlr_method,
                               'connector': dlr_connector,

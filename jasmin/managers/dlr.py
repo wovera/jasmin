@@ -259,18 +259,19 @@ class DLRLookup:
                     self.log.debug('Got DLR information for msgid[%s], url:%s, level:%s, connector:%s',
                                    msgid, dlr_url, dlr_level, dlr_connector)
 
-                    # The dlr_url in DLRContentForHttpapi indicates the level
-                    # of the actual delivery receipt (1) and not the requested
-                    # one (maybe 1 or 3)
-                    self.log.debug("Publishing DLRContentForHttpapi[%s] with routing_key[%s]",
-                                   msgid, 'dlr_thrower.http')
-                    yield self.amqpBroker.publish(exchange='messaging',
-                                                  routing_key='dlr_thrower.http',
-                                                  content=DLRContentForHttpapi(dlr_status,
-                                                                               msgid, dlr_url,
-                                                                               dlr_level=1,
-                                                                               dlr_connector=dlr_connector,
-                                                                               method=dlr_method))
+                    # An empty url means the receipt was requested for AMQP forwarding only, so skip the HTTP throw.
+                    # The dlr_url in DLRContentForHttpapi indicates the level of the actual delivery receipt (1) and
+                    # not the requested one (maybe 1 or 3).
+                    if dlr_url:
+                        self.log.debug("Publishing DLRContentForHttpapi[%s] with routing_key[%s]",
+                                       msgid, 'dlr_thrower.http')
+                        yield self.amqpBroker.publish(exchange='messaging',
+                                                      routing_key='dlr_thrower.http',
+                                                      content=DLRContentForHttpapi(dlr_status,
+                                                                                   msgid, dlr_url,
+                                                                                   dlr_level=1,
+                                                                                   dlr_connector=dlr_connector,
+                                                                                   method=dlr_method))
 
                     # id_smsc (the SMSC id) is present only on ESME_ROK.
                     yield self.forward_outcome(
@@ -418,25 +419,26 @@ class DLRLookup:
                 if dlr_level in [2, 3]:
                     self.log.debug('Got DLR information for msgid[%s], url:%s, level:%s',
                                    submit_sm_queue_id, dlr_url, dlr_level)
-                    # The dlr_url in DLRContentForHttpapi indicates the level
-                    # of the actual delivery receipt (2) and not the
-                    # requested one (maybe 2 or 3)
-                    self.log.debug("Publishing DLRContentForHttpapi[%s] with routing_key[%s]",
-                                   submit_sm_queue_id, 'dlr_thrower.http')
-                    yield self.amqpBroker.publish(exchange='messaging',
-                                                  routing_key='dlr_thrower.http',
-                                                  content=DLRContentForHttpapi(pdu_dlr_status,
-                                                                               submit_sm_queue_id,
-                                                                               dlr_url, dlr_level=2,
-                                                                               dlr_connector=pdu_dlr_id,
-                                                                               id_smsc=msgid,
-                                                                               sub=pdu_dlr_sub,
-                                                                               dlvrd=pdu_dlr_dlvrd,
-                                                                               subdate=pdu_dlr_sdate,
-                                                                               donedate=pdu_dlr_ddate,
-                                                                               err=pdu_dlr_err,
-                                                                               text=pdu_dlr_text,
-                                                                               method=dlr_method))
+                    # An empty url means the receipt was requested for AMQP forwarding only, so skip the HTTP throw.
+                    # The dlr_url in DLRContentForHttpapi indicates the level of the actual delivery receipt (2) and
+                    # not the requested one (maybe 2 or 3).
+                    if dlr_url:
+                        self.log.debug("Publishing DLRContentForHttpapi[%s] with routing_key[%s]",
+                                       submit_sm_queue_id, 'dlr_thrower.http')
+                        yield self.amqpBroker.publish(exchange='messaging',
+                                                      routing_key='dlr_thrower.http',
+                                                      content=DLRContentForHttpapi(pdu_dlr_status,
+                                                                                   submit_sm_queue_id,
+                                                                                   dlr_url, dlr_level=2,
+                                                                                   dlr_connector=pdu_dlr_id,
+                                                                                   id_smsc=msgid,
+                                                                                   sub=pdu_dlr_sub,
+                                                                                   dlvrd=pdu_dlr_dlvrd,
+                                                                                   subdate=pdu_dlr_sdate,
+                                                                                   donedate=pdu_dlr_ddate,
+                                                                                   err=pdu_dlr_err,
+                                                                                   text=pdu_dlr_text,
+                                                                                   method=dlr_method))
 
                     yield self.forward_outcome(
                         submit_sm_queue_id, level=2,

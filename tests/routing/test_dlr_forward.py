@@ -41,11 +41,14 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         defer.returnValue(json.loads(result.body))
 
     @defer.inlineCallbacks
-    def _send(self, dlr_level):
+    def _send(self, dlr_level, dlr_url=True):
         yield self.connect('127.0.0.1', self.pbPort)
         yield self.prepareRoutingsAndStartConnector()
 
-        self.params['dlr-url'] = self.dlr_url
+        if dlr_url:
+            self.params['dlr-url'] = self.dlr_url
+        else:
+            self.params.pop('dlr-url', None)
         self.params['dlr-level'] = dlr_level
         agent = Agent(reactor)
         client = HTTPClient(agent)
@@ -83,6 +86,30 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         self.assertEqual(level2['sub'], '001')
         self.assertEqual(level2['dlvrd'], '001')
         self.assertEqual(level2['err'], '000')
+
+    @defer.inlineCallbacks
+    def test_forwards_without_dlr_url(self):
+        # The outcome forwarder is independent of the HTTP dlr-url: a receipt requested by level alone still
+        # forwards both outcomes over AMQP and throws no HTTP receipt.
+        msgId = yield self._send(dlr_level=3, dlr_url=False)
+
+        yield waitFor(2)  # level1 (submit_sm_resp)
+        yield self.SMSCPort.factory.lastClient.trigger_DLR()
+        yield waitFor(1)  # level2 (deliver_sm)
+        yield self.stopSmppClientConnectors()
+
+        recs = {}
+        for _ in range(2):
+            r = yield self._get_forward()
+            self.assertIsNotNone(r)
+            recs[r['level']] = r
+
+        self.assertEqual(set(recs), {1, 2})
+        self.assertEqual(recs[1]['msgid'], msgId)
+        self.assertEqual(recs[1]['command_status'], 'ESME_ROK')
+        self.assertEqual(recs[2]['msgid'], msgId)
+        self.assertEqual(recs[2]['message_state'], 'DELIVRD')
+        self.assertIsNone(self.AckServerResource.last_request)  # no HTTP throw for a url-less request
 
     @defer.inlineCallbacks
     def test_disabled_when_queue_unset(self):
