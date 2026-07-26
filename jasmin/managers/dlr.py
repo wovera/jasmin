@@ -88,6 +88,11 @@ class DLRLookup:
         self.forward_chan = yield self.amqpBroker.newChannel()
         yield self.forward_chan.confirm_delivery()
 
+        # Declare the forward queue durably so an outcome published before any consumer binds is buffered, not dropped.
+        if self.config.dlr_forward_queue:
+            yield self.amqpBroker.named_queue_declare(
+                queue=self.config.dlr_forward_queue, durable=True)
+
     def clearRequeueTimer(self, msgid):
         if msgid in self.requeue_timers:
             try:
