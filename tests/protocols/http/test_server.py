@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from unittest.mock import Mock
 
 from twisted.internet import defer
 from twisted.trial.unittest import TestCase
@@ -7,10 +8,12 @@ from twisted.trial.unittest import TestCase
 from jasmin.managers.clients import SMPPClientManagerPB
 from jasmin.managers.configs import SMPPClientPBConfig
 from jasmin.protocols.http.configs import HTTPApiConfig
+from jasmin.protocols.http.endpoints import send as send_module
 from jasmin.protocols.http.server import HTTPApi
+from smpp.pdu import smpp_time
 from jasmin.protocols.http.stats import HttpAPIStatsCollector
 from jasmin.routing.Filters import GroupFilter
-from jasmin.routing.Routes import DefaultRoute, StaticMTRoute
+from jasmin.routing.Routes import DefaultRoute, RandomRoundrobinMTRoute, StaticMTRoute
 from jasmin.routing.router import RouterPB
 from jasmin.routing.configs import RouterPBConfig
 from jasmin.routing.jasminApi import User, Group, SmppClientConnector
@@ -33,10 +36,10 @@ class HTTPApiTestCases(TestCase):
         # Instanciate a SMPPClientManagerPB (a requirement for HTTPApi)
         SMPPClientPBConfigInstance = SMPPClientPBConfig()
         SMPPClientPBConfigInstance.authentication = False
-        clientManager_f = SMPPClientManagerPB(SMPPClientPBConfigInstance)
+        self.clientManager_f = SMPPClientManagerPB(SMPPClientPBConfigInstance)
 
         httpApiConfigInstance = HTTPApiConfig()
-        self.web = DummySite(HTTPApi(self.RouterPB_f, clientManager_f, httpApiConfigInstance))
+        self.web = DummySite(HTTPApi(self.RouterPB_f, self.clientManager_f, httpApiConfigInstance))
 
     def tearDown(self):
         self.RouterPB_f.cancelPersistenceTimer()
@@ -261,6 +264,101 @@ class SendTestCases(HTTPApiTestCases):
             self.assertEqual(response.value(),
                              ('Error "Argument [validity-period] has an invalid value: [%s]."' % params[
                                  b'validity-period']).encode())
+
+    @defer.inlineCallbacks
+    def test_send_with_validity_period_truncates_the_minted_instant(self):
+        """A minted validity instant carries no sub-second meaning and must not reach the encoder with one.
+
+        The absolute-time encoder derives a single tenths-of-a-second digit from the microseconds and rejects
+        anything above .9, which is about a tenth of all wall-clock instants. That raise surfaces inside the
+        submit callback's generic except, which discards without a retry or a receipt, long after /send answered
+        200. The clock is pinned into that rejecting band so the guarantee is proven rather than sampled.
+        """
+        submitted = []
+        self.clientManager_f.perspective_submit_sm = Mock(
+            side_effect=lambda **kwargs: submitted.append(kwargs['SubmitSmPDU']))
+
+        rejectingInstant = datetime(2026, 1, 1, 12, 0, 0, 950000)
+
+        class PinnedClock:
+            @staticmethod
+            def today():
+                return rejectingInstant
+
+            # The module also stamps stats off now(); pinning both keeps the run free of a real clock.
+            @staticmethod
+            def now():
+                return rejectingInstant
+
+        send_module.datetime = PinnedClock
+        self.addCleanup(setattr, send_module, 'datetime', datetime)
+
+        params = {b'username': self.username,
+                  b'password': b'correct',
+                  b'to': b'06155423',
+                  b'content': 'anycontent',
+                  b'validity-period': 60}
+        yield self.web.post(b'send', params)
+
+        self.assertEqual(1, len(submitted))
+        validity_period = submitted[0].params['validity_period']
+        self.assertEqual(0, validity_period.microsecond)
+        # The consequence, not just the field: the encoder accepts it where the untruncated instant would raise.
+        smpp_time.unparse_absolute_time(validity_period)
+        self.assertRaises(ValueError, smpp_time.unparse_absolute_time, rejectingInstant)
+
+    def routeOverTwoConnectors(self):
+        """Replace the default route with a random pool of two connectors, and report neither as bound."""
+        self.RouterPB_f.mt_routing_table.flush()
+        self.RouterPB_f.mt_routing_table.add(
+            RandomRoundrobinMTRoute(
+                [GroupFilter(self.g1)],
+                [SmppClientConnector('bound-one'), SmppClientConnector('unbound-one')],
+                0.0),
+            2)
+        self.clientManager_f.perspective_connector_details = Mock(return_value=False)
+
+        submitted = []
+        self.clientManager_f.perspective_submit_sm = Mock(
+            side_effect=lambda **kwargs: submitted.append(kwargs['cid']))
+        return submitted
+
+    @defer.inlineCallbacks
+    def test_send_over_a_random_route_never_picks_an_unbound_connector(self):
+        """Spreading at random over a pool holding an unbound connector sends a share of the traffic nowhere.
+
+        Those submits are not refused: they sit queued against a connector that cannot deliver and age out
+        silently, so the loss is invisible at the API. Only the bound connector may be chosen.
+        """
+        submitted = self.routeOverTwoConnectors()
+        self.clientManager_f.perspective_connector_details = Mock(
+            side_effect=lambda cid: {'session_state': 'BOUND_TRX'} if cid == 'bound-one' else False)
+
+        params = {b'username': self.username,
+                  b'password': b'correct',
+                  b'to': b'06155423',
+                  b'content': 'anycontent'}
+        for _ in range(20):
+            yield self.web.post(b'send', params)
+
+        # Enough draws that an unfiltered random choice over two connectors would land on the unbound one.
+        self.assertEqual(20, len(submitted))
+        self.assertEqual({'bound-one'}, set(submitted))
+
+    @defer.inlineCallbacks
+    def test_send_over_a_random_route_refuses_when_no_connector_is_bound(self):
+        """An all-unbound pool is refused before the 200, rather than enqueued against nothing."""
+        submitted = self.routeOverTwoConnectors()
+
+        params = {b'username': self.username,
+                  b'password': b'correct',
+                  b'to': b'06155423',
+                  b'content': 'anycontent'}
+        response = yield self.web.post(b'send', params)
+
+        self.assertEqual(response.responseCode, 412)
+        self.assertEqual(response.value(), b'Error "Route has no bound connectors"')
+        self.assertEqual([], submitted)
 
     @defer.inlineCallbacks
     def test_send_with_inurl_dlr(self):

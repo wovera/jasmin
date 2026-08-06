@@ -248,11 +248,17 @@ class Send(Resource):
                         routedConnector = route.getConnector()
                         if routedConnector is None:
                             break
+            elif repr(route) == 'RandomRoundrobinMTRoute':
+                # Spreading at random over a pool holding an unbound connector would route a share of the
+                # submits to a connector that cannot deliver them, and they age out silently.
+                routedConnector = route.getBoundConnector(
+                    lambda cid: (self.SMPPClientManagerPB.perspective_connector_details(cid) or {}).get(
+                        'session_state', '')[:6] == 'BOUND_')
 
             if routedConnector is None:
                 self.stats.inc('route_error_count')
-                self.log.error("Failover route has no bound connector to handle SubmitSmPDU: %s", routable.pdu)
-                raise ConnectorNotFoundError("Failover route has no bound connectors")
+                self.log.error("Route has no bound connector to handle SubmitSmPDU: %s", routable.pdu)
+                raise ConnectorNotFoundError("Route has no bound connectors")
 
             # Re-update SubmitSmPDU with parameters from the route's connector
             connector_config = self.SMPPClientManagerPB.perspective_connector_config(routedConnector.cid)
@@ -281,7 +287,10 @@ class Send(Resource):
             # Set validity_period
             if b'validity-period' in updated_request.args:
                 delta = timedelta(minutes=int(updated_request.args[b'validity-period'][0]))
-                param_updates['validity_period'] = datetime.today() + delta
+                # The window is minute-granular, so the wall-clock microseconds carry nothing; they are dropped
+                # because the absolute-time encoder derives a single tenths-of-a-second digit from them and
+                # rejects any instant above .9, which would discard the submit rather than send it.
+                param_updates['validity_period'] = (datetime.today() + delta).replace(microsecond=0)
                 self.log.debug(
                     "SubmitSmPDU validity_period is set to %s (+%s minutes)",
                     routable.pdu.params['validity_period'],

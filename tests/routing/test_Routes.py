@@ -190,6 +190,26 @@ class RandomRoundrobinMTRouteTestCase(RouteTestCase):
                           0.0)
         self.assertRaises(InvalidRouteParameterError, RandomRoundrobinMTRoute, self.simple_filter_mt, [0, 1], 0.0)
 
+    def test_getBoundConnector_never_returns_an_unbound_connector(self):
+        o = RandomRoundrobinMTRoute(self.simple_filter_mt, self.connectors, 0.0)
+
+        # An unfiltered random pick over two connectors would take the unbound one within these draws.
+        for _ in range(20):
+            self.assertEqual(
+                o.getBoundConnector(lambda cid: cid == self.connector2.cid).cid,
+                self.connector2.cid)
+
+    def test_getBoundConnector_returns_none_when_none_is_bound(self):
+        o = RandomRoundrobinMTRoute(self.simple_filter_mt, self.connectors, 0.0)
+
+        self.assertIsNone(o.getBoundConnector(lambda cid: False))
+
+    def test_getBoundConnector_spreads_over_every_bound_connector(self):
+        o = RandomRoundrobinMTRoute(self.simple_filter_mt, self.connectors, 0.0)
+
+        picked = set(o.getBoundConnector(lambda cid: True).cid for _ in range(50))
+        self.assertEqual(picked, {self.connector1.cid, self.connector2.cid})
+
 
 class RandomRoundrobinMORouteTestCase(RouteTestCase):
     def setUp(self):

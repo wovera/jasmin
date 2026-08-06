@@ -28,6 +28,22 @@ from jasmin.tools import qos
 LOG_CATEGORY = "jasmin-sm-listener"
 
 
+def segment_smpp_msgids(reqPDU):
+    """Every SMSC id acknowledged for a submit, one per segment, in the order they were sent.
+
+    Empty for a single submit: only the segments of a long message carry a per-PDU response.
+    """
+    msgids = []
+    pdu = reqPDU
+    while True:
+        response = getattr(pdu, 'response', None)
+        if response is not None and 'message_id' in response.params:
+            msgids.append(response.params['message_id'])
+        if not hasattr(pdu, 'nextPdu'):
+            return msgids
+        pdu = pdu.nextPdu
+
+
 class SMPPClientSMListener:
     """
     This is a listener object instantiated for every new SMPP connection, it is responsible of handling
@@ -445,7 +461,8 @@ class SMPPClientSMListener:
                 # request PDU carries no .response attribute for single-part (non-chained) submits.
                 if r.response.status == CommandStatus.ESME_ROK:
                     dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status,
-                              smpp_msgid=r.response.params['message_id'])
+                              smpp_msgid=r.response.params['message_id'],
+                              smpp_msgids=segment_smpp_msgids(r.request))
                 else:
                     dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status)
                 yield self.amqpBroker.publish(exchange='messaging', routing_key='dlr.submit_sm_resp', content=dlr)

@@ -51,7 +51,8 @@ class PDU(Content):
 class DLR(Content):
     """A DLR is published to dlr.* routes for DLRLookup"""
 
-    def __init__(self, pdu_type, msgid, status, smpp_msgid=None, cid=None, dlr_details=None):
+    def __init__(self, pdu_type, msgid, status, smpp_msgid=None, cid=None, dlr_details=None,
+                 smpp_msgids=None):
 
         if pdu_type not in (CommandId.deliver_sm, CommandId.data_sm, CommandId.submit_sm_resp):
             raise InvalidParameterError('Invalid pdu_type: %s' % pdu_type.name)
@@ -66,6 +67,11 @@ class DLR(Content):
         if pdu_type == CommandId.submit_sm_resp and smpp_msgid is not None:
             # smpp_msgid is used to define mapping between msgid and smpp_msgid (when receiving submit_sm_resp ESME_ROK)
             properties['headers']['smpp_msgid'] = smpp_msgid.decode().upper().lstrip('0')
+            if smpp_msgids:
+                # A long message is acknowledged segment by segment, each with its own id, and a receipt may
+                # quote any of them, so every segment must map back to this message and not only the last.
+                properties['headers']['smpp_msgids'] = ','.join(
+                    each.decode().upper().lstrip('0') for each in smpp_msgids)
         elif pdu_type in (CommandId.deliver_sm, CommandId.data_sm):
             properties['headers']['cid'] = cid
             for k, v in dlr_details.items():

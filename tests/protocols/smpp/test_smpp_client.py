@@ -11,6 +11,7 @@ from twisted.internet.protocol import Factory
 from twisted.python import log
 from twisted.trial.unittest import TestCase
 
+from jasmin.managers.listeners import segment_smpp_msgids
 from jasmin.protocols.smpp.configs import SMPPClientConfig
 from jasmin.protocols.smpp.factory import SMPPClientFactory
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
@@ -486,6 +487,25 @@ class LongSubmitSmTestCase(SimulatorTestCase):
         smpp.startLongSubmitSmTransaction = Mock(wraps=smpp.startLongSubmitSmTransaction)
         smpp.endLongSubmitSmTransaction = Mock(wraps=smpp.endLongSubmitSmTransaction)
 
+    def assertEverySegmentKeptItsOwnResponse(self, sent, recv, nbrParts):
+        """The transaction fires per segment but calls back once, so each segment has to keep its own response.
+
+        Without it only the last segment's SMSC id is knowable, and a receipt quoting any earlier segment cannot
+        be resolved.
+        """
+        responses = [getattr(sent[i], 'response', None) for i in range(nbrParts)]
+        for i, response in enumerate(responses):
+            self.assertTrue(response is not None, 'segment %s kept no response' % i)
+            self.assertEqual(response.params['message_id'], recv[i].params['message_id'])
+
+        # Distinct OBJECTS, not distinct ids: whether an SMSC mints a fresh id per segment is its business, so
+        # identity is what proves each segment stored its own response rather than sharing one.
+        self.assertEqual(len({id(response) for response in responses}), nbrParts)
+
+        # The collector walks the live chain, so it is proven against real transaction state, not a hand-built one.
+        msgids = [response.params['message_id'] for response in responses]
+        self.assertEqual(segment_smpp_msgids(sent[0]), msgids)
+
 
 class LongSubmitSmWithSARTestCase(LongSubmitSmTestCase):
     def setUp(self):
@@ -516,6 +536,8 @@ class LongSubmitSmWithSARTestCase(LongSubmitSmTestCase):
             self.assertEqual(nbrParts, sent[i].params['sar_total_segments'])
             self.assertEqual(i + 1, sent[i].params['sar_segment_seqnum'])
             self.assertEqual(sar_msg_ref_num, sent[i].params['sar_msg_ref_num'])
+
+        self.assertEverySegmentKeptItsOwnResponse(sent, recv, nbrParts)
 
         # Assert no LongSubmitSm transactions are still open
         self.assertEqual(0, len(smpp.longSubmitSmTxns))
@@ -563,6 +585,8 @@ class LongSubmitSmWithUDHTestCase(LongSubmitSmTestCase):
             self.assertEqual(nbrParts, sent[i].params['short_message'][4])
             self.assertEqual(i + 1, sent[i].params['short_message'][5])
             self.assertEqual(msg_ref_num, sent[i].params['short_message'][3])
+
+        self.assertEverySegmentKeptItsOwnResponse(sent, recv, nbrParts)
 
         # Assert no LongSubmitSm transactions are still open
         self.assertEqual(0, len(smpp.longSubmitSmTxns))

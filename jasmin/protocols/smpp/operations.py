@@ -1,5 +1,4 @@
 import datetime
-import math
 import re
 import struct
 from enum import Enum
@@ -156,6 +155,36 @@ class SMPPOperationFactory:
 
         return self.lastLongMsgRefNum
 
+    @staticmethod
+    def _splitLongMessage(longMessage, chunkLength, bits):
+        """Split an encoded message into segments that never cut a character in half.
+
+        TS 23.038 6.2.1 encodes ten characters as a two-septet escape sequence, and TS 23.040 9.2.3.24.1 forbids
+        splitting one across segments; a UTF-16 surrogate pair is indivisible for the same reason. A fixed-offset
+        slice severs both, and the receiving handset renders the escape's second septet as its basic-table meaning
+        (so a euro sign arrives as `e`) or the lone surrogates as replacement characters. Backing the boundary off
+        by one unit spends a septet to carry the character whole into the next segment, which can add a segment.
+        """
+        step = chunkLength * 2 if bits == 16 else chunkLength
+        escape = b'\x1b' if isinstance(longMessage, bytes) else '\x1b'
+        segments = []
+        start = 0
+
+        while start < len(longMessage):
+            end = min(start + step, len(longMessage))
+            if end < len(longMessage):
+                if bits == 16 and isinstance(longMessage, bytes):
+                    codeUnit = longMessage[end - 2] << 8 | longMessage[end - 1]
+                    if 0xD800 <= codeUnit <= 0xDBFF:
+                        end -= 2
+                elif bits == 7 and longMessage[end - 1:end] == escape:
+                    end -= 1
+
+            segments.append(longMessage[start:end])
+            start = end
+
+        return segments
+
     def SubmitSM(self, short_message, data_coding=0, **kwargs):
         """Depending on the short_message length, this method will return a classical SubmitSM or
         a serie of linked SubmitSMs (parted message)
@@ -193,7 +222,10 @@ class SMPPOperationFactory:
         # if SM is longer than maxSmLength, build multiple SubmitSMs
         # and link them
         if smLength > maxSmLength:
-            total_segments = int(math.ceil(smLength / float(slicedMaxSmLength)))
+            # Segment on real boundaries first: a character carried whole into the next segment can add one, so the
+            # count the SAR/UDH headers advertise has to come from the split rather than from dividing the length.
+            segments = self._splitLongMessage(longMessage, slicedMaxSmLength, bits)
+            total_segments = len(segments)
             # Obey to configured longContentMaxParts
             if total_segments > self.long_content_max_parts:
                 total_segments = self.long_content_max_parts
@@ -210,10 +242,7 @@ class SMPPOperationFactory:
                 except NameError:
                     previousPdu = None
 
-                if bits == 16:
-                    kwargs['short_message'] = longMessage[slicedMaxSmLength * i * 2:slicedMaxSmLength * (i + 1) * 2]
-                else:
-                    kwargs['short_message'] = longMessage[slicedMaxSmLength * i:slicedMaxSmLength * (i + 1)]
+                kwargs['short_message'] = segments[i]
                 tmpPdu = self._setConfigParamsInPDU(SubmitSM(**kwargs), kwargs)
                 if self.long_content_split == 'sar':
                     # Slice short_message and create the PDU using SAR options

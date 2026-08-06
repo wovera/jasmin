@@ -94,6 +94,115 @@ class SubmitTest(OperationsTest):
         # The last seqNum shall be equal to total segments
         self.assertEqual(lastSeqNum, pdu.params['sar_total_segments'])
 
+    def collectPdus(self, sm, data_coding=0, opFactory=None):
+        """Return every PDU in the chain, in order."""
+        pdu = (opFactory or self.opFactory).SubmitSM(
+            source_addr=self.source_addr,
+            destination_addr=self.destination_addr,
+            short_message=sm,
+            data_coding=data_coding,
+        )
+
+        pdus = []
+        while True:
+            pdus.append(pdu)
+            try:
+                pdu = pdu.nextPdu
+            except AttributeError:
+                return pdus
+
+    def collectSegments(self, sm, data_coding=0):
+        """Return the short_message of every PDU in the chain, in order."""
+        return [pdu.params['short_message'] for pdu in self.collectPdus(sm, data_coding)]
+
+    def test_encode_gsm0338_escape_not_split(self):
+        """A GSM 03.38 escape sequence must stay whole across a segment boundary (TS 23.040 9.2.3.24.1).
+
+        A fixed-offset slice would end segment one on the lone 0x1B and open segment two with the euro's
+        extension code, which a handset renders as the basic-table 'e'.
+        """
+        # 152 basic septets then euro signs, so an escape pair straddles the 153-septet boundary.
+        sm = b'a' * 152 + b'\x1b\x65' * 77
+
+        segments = self.collectSegments(sm)
+
+        self.assertEqual(b''.join(segments), sm)
+        for segment in segments:
+            self.assertFalse(segment.endswith(b'\x1b'), 'segment ends on a bare escape')
+        # Backing each boundary off a septet costs a third segment; dividing 306 septets by 153 would say two.
+        self.assertEqual(len(segments), 3)
+
+    def test_encode_ucs2_surrogate_pair_not_split(self):
+        """A UTF-16 surrogate pair is indivisible, so it must not straddle a segment boundary."""
+        # 66 BMP code units then a non-BMP pair, which lands across the 67-code-unit boundary.
+        sm = b'\x00a' * 66 + b'\xd8\x3d\xde\x00' + b'\x00b' * 20
+
+        segments = self.collectSegments(sm, data_coding=8)
+
+        self.assertEqual(b''.join(segments), sm)
+        for segment in segments:
+            units = [segment[i:i + 2] for i in range(0, len(segment), 2)]
+            self.assertFalse(
+                units and 0xD800 <= int.from_bytes(units[-1], 'big') <= 0xDBFF,
+                'segment ends on a high surrogate',
+            )
+            self.assertFalse(
+                units and 0xDC00 <= int.from_bytes(units[0], 'big') <= 0xDFFF,
+                'segment starts on a low surrogate',
+            )
+
+    def test_encode_binary_coding_splits_at_fixed_offsets(self):
+        """Only GSM 03.38 and UCS2 carry multi-unit characters, so a binary coding must not be second-guessed.
+
+        A 0x1B or a 0xD8-0xDB byte pair is ordinary data under an 8-bit or national coding; backing a boundary off
+        there would shorten segments for no reason and could push a message past the parts cap.
+        """
+        sm = b'\x1b' * 400
+
+        segments = self.collectSegments(sm, data_coding=3)
+
+        self.assertEqual(b''.join(segments), sm)
+        # 134 octets per segment for an 8-bit coding, sliced at fixed offsets: 400 = 134 + 134 + 132.
+        self.assertEqual([len(segment) for segment in segments], [134, 134, 132])
+
+    def test_encode_udh_split_advertises_the_real_segment_count(self):
+        """The UDH concatenation header carries the total, and the HTTP API's default split is udh, not sar.
+
+        The count comes from the boundary-aware split, so the header a handset reassembles by must agree with the
+        number of PDUs actually chained.
+        """
+        udhFactory = SMPPOperationFactory(
+            SMPPClientConfig(id='test-id'), long_content_split='udh'
+        )
+        sm = b'a' * 152 + b'\x1b\x65' * 77
+
+        pdus = self.collectPdus(sm, opFactory=udhFactory)
+
+        self.assertEqual(len(pdus), 3)
+        assembled = b''
+        for seqnum, pdu in enumerate(pdus, start=1):
+            shortMessage = pdu.params['short_message']
+            udh, payload = shortMessage[:6], shortMessage[6:]
+            self.assertEqual(udh[0:3], b'\x05\x00\x03')  # UDH length, concatenation IEI, IE length
+            self.assertEqual(udh[4], len(pdus))  # total parts, as the handset reads it
+            self.assertEqual(udh[5], seqnum)
+            self.assertFalse(payload.endswith(b'\x1b'), 'segment ends on a bare escape')
+            assembled += payload
+
+        self.assertEqual(assembled, sm)
+
+    def test_encode_sar_split_advertises_the_real_segment_count(self):
+        """The SAR total must equal the chain length, or reassembly waits forever for a part that never comes."""
+        sm = b'a' * 152 + b'\x1b\x65' * 77
+
+        pdus = self.collectPdus(sm)
+
+        # The literal comes first: total and chain length both derive from one variable, so comparing them to each
+        # other can never fail. Only a stated count catches a split that stops early.
+        self.assertEqual(len(pdus), 3)
+        for pdu in pdus:
+            self.assertEqual(pdu.params['sar_total_segments'], len(pdus))
+
 
 class DeliveryParsingTest(OperationsTest):
     def test_is_delivery_standard(self):

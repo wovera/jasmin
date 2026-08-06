@@ -417,9 +417,15 @@ class SMPPServerFactory(_SMPPServerFactory):
                         routedConnector = route.getConnector()
                         if routedConnector is None:
                             break
+            elif repr(route) == 'RandomRoundrobinMTRoute':
+                # Spreading at random over a pool holding an unbound connector would route a share of the
+                # submits to a connector that cannot deliver them, and they age out silently.
+                routedConnector = route.getBoundConnector(
+                    lambda cid: (self.SMPPClientManagerPB.perspective_connector_details(cid) or {}).get(
+                        'session_state', '')[:6] == 'BOUND_')
 
             if routedConnector is None:
-                self.log.error("Failover route has no bound connector to handle SubmitSmPDU: %s",
+                self.log.error("Route has no bound connector to handle SubmitSmPDU: %s",
                                routable.pdu)
                 raise SubmitSmRoutingError()
 

@@ -19,6 +19,18 @@ from jasmin.tools import to_enum
 LOG_CATEGORY = "dlr"
 
 
+def acknowledged_smpp_msgids(message):
+    """Every SMSC id the submit was acknowledged with: one per segment for a long message, else the single id.
+
+    A receipt may quote any segment of a long message, so each of them has to resolve back to the same message.
+    """
+    headers = message.content.properties['headers']
+    if headers.get('smpp_msgids'):
+        return headers['smpp_msgids'].split(',')
+
+    return [headers['smpp_msgid']]
+
+
 class RedisError(Exception):
     """Raised for any Redis connectivity problem"""
 
@@ -319,14 +331,14 @@ class DLRLookup:
                         'Terminal level receipt is requested, will not send any DLR receipt at this level.')
 
                 if dlr_level in [2, 3] and dlr_status == 'ESME_ROK':
-                    smpp_msgid = message.content.properties['headers']['smpp_msgid']
-                    # Map received submit_sm_resp's message_id to the msg for later receipt handling
-                    self.log.debug('Mapping smpp msgid: %s to queue msgid: %s, expiring in %s',
-                                   smpp_msgid, msgid, dlr_expiry)
-                    hashKey = "queue-msgid:%s" % smpp_msgid
                     hashValues = {'msgid': msgid, 'connector_type': 'httpapi'}
-                    yield self.redisClient.hmset(hashKey, hashValues)
-                    yield self.redisClient.expire(hashKey, dlr_expiry)
+                    for smpp_msgid in acknowledged_smpp_msgids(message):
+                        # Map received submit_sm_resp's message_id to the msg for later receipt handling
+                        self.log.debug('Mapping smpp msgid: %s to queue msgid: %s, expiring in %s',
+                                       smpp_msgid, msgid, dlr_expiry)
+                        hashKey = "queue-msgid:%s" % smpp_msgid
+                        yield self.redisClient.hmset(hashKey, hashValues)
+                        yield self.redisClient.expire(hashKey, dlr_expiry)
             elif dlr['sc'] == 'smppsapi':
                 self.log.debug('There is a SMPPs mapping for msgid[%s] ...', msgid)
                 system_id = dlr['system_id']
@@ -370,14 +382,14 @@ class DLRLookup:
                                                                                  dest_addr_npi))
 
                     if dlr_status == 'ESME_ROK':
-                        smpp_msgid = message.content.properties['headers']['smpp_msgid']
-                        # Map received submit_sm_resp's message_id to the msg for later rceipt handling
-                        self.log.debug('Mapping smpp msgid: %s to queue msgid: %s, expiring in %s',
-                                       smpp_msgid, msgid, smpps_map_expiry)
-                        hashKey = "queue-msgid:%s" % smpp_msgid
                         hashValues = {'msgid': msgid, 'connector_type': 'smppsapi'}
-                        yield self.redisClient.hmset(hashKey, hashValues)
-                        yield self.redisClient.expire(hashKey, smpps_map_expiry)
+                        for smpp_msgid in acknowledged_smpp_msgids(message):
+                            # Map received submit_sm_resp's message_id to the msg for later rceipt handling
+                            self.log.debug('Mapping smpp msgid: %s to queue msgid: %s, expiring in %s',
+                                           smpp_msgid, msgid, smpps_map_expiry)
+                            hashKey = "queue-msgid:%s" % smpp_msgid
+                            yield self.redisClient.hmset(hashKey, hashValues)
+                            yield self.redisClient.expire(hashKey, smpps_map_expiry)
         except DLRMapError as e:
             self.log.error('[msgid:%s] DLR Content: %s', msgid, e)
             yield self.rejectMessage(message)

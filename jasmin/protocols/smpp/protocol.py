@@ -211,6 +211,10 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
         reqPDU = _SMPPOutboundTxnResult.request
         respPDU = _SMPPOutboundTxnResult.response
 
+        # Only the last segment's response reaches the transaction callback, so each segment keeps its own:
+        # the SMSC acknowledges every segment with a distinct id and a receipt may quote any of them.
+        reqPDU.response = respPDU
+
         # Do we have txn with the given ref ?
         if reqPDU.LongSubmitSm['msg_ref_num'] not in self.longSubmitSmTxns:
             self.log.error(

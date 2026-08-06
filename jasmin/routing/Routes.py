@@ -226,6 +226,15 @@ class RoundrobinRoute:
     def getConnector(self):
         return random.choice(self.connector)
 
+    def getBoundConnector(self, isBound):
+        """Pick randomly among the connectors the caller reports bound, None when none of them is.
+
+        Routing to an unbound connector enqueues a message that connector cannot deliver, and it ages out
+        silently instead of failing.
+        """
+        bound = [c for c in self.connector if isBound(c.cid)]
+        return random.choice(bound) if bound else None
+
 
 class RandomRoundrobinMORoute(RoundrobinRoute, MORoute):
     """Return one route taken randomly from a pool of

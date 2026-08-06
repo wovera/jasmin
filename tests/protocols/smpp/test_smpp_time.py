@@ -24,3 +24,19 @@ class SMPPTimeTest(TestCase):
         self.assertEqual(unpickled_tz.dst(datetime.now()), tz.dst(datetime.now()))
         self.assertEqual(unpickled_tz.utcoffset(datetime.now()), tz.utcoffset(datetime.now()))
         self.assertEqual(unpickled_tz.tzname(datetime.now()), tz.tzname(datetime.now()))
+
+    def test_unparse_absolute_time_rejects_a_sub_tenth_instant(self):
+        """The absolute-time format carries one tenths-of-a-second digit, and the encoder derives it from
+        microseconds by true division, so any wall-clock instant past .9 raises instead of encoding. A caller
+        minting an absolute time from the clock must therefore drop the sub-second part.
+        """
+        self.assertRaises(ValueError, smpp_time.unparse_absolute_time,
+                          datetime(2026, 1, 1, 12, 30, 15, 950000))
+
+    def test_unparse_absolute_time_accepts_a_second_truncated_instant(self):
+        """Truncating to whole seconds encodes from every originating microsecond, including the ones that
+        otherwise raise.
+        """
+        for microsecond in (0, 1, 499999, 900000, 900001, 999999):
+            minted = datetime(2026, 1, 1, 12, 30, 15, microsecond).replace(microsecond=0)
+            self.assertEqual(smpp_time.unparse_absolute_time(minted), b'260101123015000+')
