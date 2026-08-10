@@ -9,10 +9,10 @@ from twisted.web.server import NOT_DONE_YET
 import messaging.sms.gsm0338
 
 from jasmin.routing.Routables import RoutableSubmitSm
-from jasmin.protocols.smpp.operations import SMPPOperationFactory
-from jasmin.protocols.http.errors import UrlArgsValidationError
+from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageExceedsMaxPartsError
+from jasmin.protocols.http.errors import UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
-from jasmin.protocols.http.errors import HttpApiError, AuthenticationError, InterceptorNotSetError, InterceptorNotConnectedError, InterceptorRunError, RouteNotFoundError
+from jasmin.protocols.http.errors import HttpApiError, ServerError, AuthenticationError, InterceptorNotSetError, InterceptorNotConnectedError, InterceptorRunError, RouteNotFoundError
 from jasmin.protocols.http.endpoints import hex2bin, authenticate_user
 
 
@@ -37,7 +37,7 @@ class Rate(Resource):
             # Do we have a hex-content ?
             if b'hex-content' not in request.args:
                 # Convert utf8 to GSM 03.38
-                if request.args[b'coding'][0] == '0':
+                if request.args[b'coding'][0] == b'0':
                     if isinstance(request.args[b'content'][0], bytes):
                         short_message = request.args[b'content'][0].decode().encode('gsm0338', 'replace')
                     else:
@@ -65,12 +65,15 @@ class Rate(Resource):
             user.getCnxStatus().httpapi['last_activity_at'] = datetime.now()
 
             # Build SubmitSmPDU
-            SubmitSmPDU = self.opFactory.SubmitSM(
-                source_add=None if b'from' not in request.args else request.args[b'from'][0],
-                destination_addr=request.args[b'to'][0],
-                short_message=short_message,
-                data_coding=int(request.args[b'coding'][0]),
-            )
+            try:
+                SubmitSmPDU = self.opFactory.SubmitSM(
+                    source_addr=None if b'from' not in request.args else request.args[b'from'][0],
+                    destination_addr=request.args[b'to'][0],
+                    short_message=short_message,
+                    data_coding=int(request.args[b'coding'][0]),
+                )
+            except LongMessageExceedsMaxPartsError as e:
+                raise LongContentExceededError(str(e))
             self.log.debug("Built base SubmitSmPDU: %s", SubmitSmPDU)
 
             # Make Credential validation
@@ -154,10 +157,10 @@ class Rate(Resource):
                 'status': 200}
         except HttpApiError as e:
             self.log.error("Error: %s", e)
-            response = {'return': e.message, 'status': e.code}
+            response = {'return': e.message, 'status': e.code, 'token': e.token}
         except Exception as e:
             self.log.error("Error: %s", e)
-            response = {'return': "Unknown error: %s" % e, 'status': 500}
+            response = {'return': "Unknown error: %s" % e, 'status': 500, 'token': ServerError.token}
         finally:
             self.log.debug("Returning %s to %s.", response, request.getClientIP())
 
@@ -167,6 +170,8 @@ class Rate(Resource):
                 request.setResponseCode(500)
             else:
                 request.setResponseCode(response['status'])
+            if 'token' in response:
+                request.setHeader(ERROR_CODE_HEADER, response['token'])
 
             if isinstance(response['return'], bytes):
                 request.write(json.dumps(response['return'].decode()).encode())
@@ -238,6 +243,7 @@ class Rate(Resource):
                 request.setResponseCode(500)
             else:
                 request.setResponseCode(response['status'])
+            request.setHeader(ERROR_CODE_HEADER, e.token)
             if isinstance(response['return'], bytes):
                 return json.dumps(response['return'].decode()).encode()
             return json.dumps(response['return']).encode()
@@ -254,6 +260,7 @@ class Rate(Resource):
                 request.setResponseCode(500)
             else:
                 request.setResponseCode(response['status'])
+            request.setHeader(ERROR_CODE_HEADER, ServerError.token)
             return json.dumps(response['return']).encode()
         else:
             return NOT_DONE_YET

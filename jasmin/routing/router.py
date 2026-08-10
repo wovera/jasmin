@@ -85,6 +85,10 @@ class RouterPB(pb.Avatar):
             yield self.amqpBroker.channelReady
             self.log.info("AMQP Broker channel is ready now, let's go !")
 
+        yield self.subscribe()
+
+    @defer.inlineCallbacks
+    def subscribe(self):
         # Subscribe to deliver.sm.* queues
         consumerTag = 'RouterPB-delivers'
         routingKey = 'deliver.sm.*'
@@ -112,6 +116,10 @@ class RouterPB(pb.Avatar):
             self._on_bill_request_submit_sm_resp).addErrback(
             self.bill_request_submit_sm_resp_errback)
         self.log.info('RouterPB is consuming from routing key: %s', routingKey)
+
+        # Re-run on every later connection: these channels and their consumers die with the connection, and a
+        # broker restart takes the queues too, so inbound messages and billing requests would go unrouted.
+        self.amqpBroker.addChannelReadyCallback(self.subscribe)
 
     def rejectMessage(self, message):
         # Reject on the channel that delivered the message. If that channel has since closed, the broker

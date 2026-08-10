@@ -14,7 +14,7 @@ from twisted.trial.unittest import TestCase
 from jasmin.managers.listeners import segment_smpp_msgids
 from jasmin.protocols.smpp.configs import SMPPClientConfig
 from jasmin.protocols.smpp.factory import SMPPClientFactory
-from jasmin.protocols.smpp.operations import SMPPOperationFactory
+from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageExceedsMaxPartsError
 from jasmin.protocols.smpp.protocol import *
 from jasmin.protocols.smpp.stats import SMPPClientStatsCollector
 from tests.protocols.smpp.smsc_simulator import *
@@ -657,21 +657,22 @@ class LongSubmitSmUsingSARTestCase(LongSubmitSmWithSARTestCase):
 
         # Send submit_sm
         content = self.composeMessage(GSM0338, 1530)  # 1530 = 153 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=0,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_8bit(self):
@@ -708,21 +709,22 @@ class LongSubmitSmUsingSARTestCase(LongSubmitSmWithSARTestCase):
 
         # Send submit_sm
         content = self.composeMessage(ISO_8859, 1340)  # 1340 = 134 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=3,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_16bit(self):
@@ -761,21 +763,22 @@ class LongSubmitSmUsingSARTestCase(LongSubmitSmWithSARTestCase):
         # Send submit_sm
         UCS2 = {b'\x06\x23', b'\x06\x31', b'\x06\x46', b'\x06\x28'}
         content = self.composeMessage(UCS2, 3350)  # 3350 = 67 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=8,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
 
 class LongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
@@ -838,21 +841,22 @@ class LongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
 
         # Send submit_sm
         content = self.composeMessage(GSM0338, 1530)  # 1530 = 153 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=0,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_8bit(self):
@@ -889,21 +893,22 @@ class LongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
 
         # Send submit_sm
         content = self.composeMessage(ISO_8859, 1340)  # 1340 = 134 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=3,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_16bit(self):
@@ -942,21 +947,22 @@ class LongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
         # Send submit_sm
         UCS2 = {b'\x06\x23', b'\x06\x31', b'\x06\x46', b'\x06\x28'}
         content = self.composeMessage(UCS2, 1072)  # 1072 = (67*2) * 8
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=8,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
 
 class VeryLongSubmitSmUsingSARTestCase(LongSubmitSmWithSARTestCase):
@@ -1010,21 +1016,22 @@ class VeryLongSubmitSmUsingSARTestCase(LongSubmitSmWithSARTestCase):
 
         # Send submit_sm
         content = self.composeMessage(GSM0338, 1530)  # 1530 = 153 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=0,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_8bit(self):
@@ -1061,21 +1068,22 @@ class VeryLongSubmitSmUsingSARTestCase(LongSubmitSmWithSARTestCase):
 
         # Send submit_sm
         content = self.composeMessage(ISO_8859, 1340)  # 1340 = 134 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=3,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_16bit(self):
@@ -1114,21 +1122,22 @@ class VeryLongSubmitSmUsingSARTestCase(LongSubmitSmWithSARTestCase):
         # Send submit_sm
         UCS2 = {b'\x06\x23', b'\x06\x31', b'\x06\x46', b'\x06\x28'}
         content = self.composeMessage(UCS2, 3350)  # 3350 = 67 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=8,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
 
 class VeryLongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
@@ -1182,21 +1191,22 @@ class VeryLongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
 
         # Send submit_sm
         content = self.composeMessage(GSM0338, 1530)  # 1530 = 153 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=0,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_8bit(self):
@@ -1233,21 +1243,22 @@ class VeryLongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
 
         # Send submit_sm
         content = self.composeMessage(ISO_8859, 1340)  # 1340 = 134 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=3,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
     @defer.inlineCallbacks
     def test_long_submit_sm_16bit(self):
@@ -1286,21 +1297,22 @@ class VeryLongSubmitSmUsingUDHTestCase(LongSubmitSmWithUDHTestCase):
         # Send submit_sm
         UCS2 = {b'\x06\x23', b'\x06\x31', b'\x06\x46', b'\x06\x28'}
         content = self.composeMessage(UCS2, 3350)  # 3350 = 67 * 10
-        SubmitSmPDU = self.opFactory.SubmitSM(
+        self.assertRaises(
+            LongMessageExceedsMaxPartsError,
+            self.opFactory.SubmitSM,
             source_addr=self.source_addr,
             destination_addr=self.destination_addr,
             short_message=content,
             data_coding=8,
         )
-        yield smpp.sendDataRequest(SubmitSmPDU)
 
         # Unbind & Disconnect
         yield smpp.unbindAndDisconnect()
 
         ##############
         # Assertions :
-        self.assertEqual(self.long_content_max_parts + 1, smpp.PDUReceived.call_count)
-        self.assertEqual(self.long_content_max_parts + 1, smpp.sendPDU.call_count)
+        # Refused before a single segment is built, so only the unbind reaches the wire.
+        self.assertEqual(1, smpp.sendPDU.call_count)
 
 
 class LongSubmitSmErrorOnSubmitSmTestCase(SimulatorTestCase):

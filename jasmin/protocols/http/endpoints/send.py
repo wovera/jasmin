@@ -13,10 +13,10 @@ from smpp.pdu.pdu_types import RegisteredDeliveryReceipt, RegisteredDelivery
 
 from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.protocols.smpp.configs import SMPPClientConfig
-from jasmin.protocols.smpp.operations import SMPPOperationFactory
+from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageExceedsMaxPartsError
 from jasmin.tools.tlv import format_tlvs_for_log
 from jasmin.tools.tlv_encoder import normalize_custom_tlvs
-from jasmin.protocols.http.errors import UrlArgsValidationError
+from jasmin.protocols.http.errors import UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
 from jasmin.protocols.http.errors import (HttpApiError, AuthenticationError, ServerError, RouteNotFoundError, ConnectorNotFoundError,
                      ChargingError, ThroughputExceededError, InterceptorNotSetError,
@@ -115,12 +115,15 @@ class Send(Resource):
             user.getCnxStatus().httpapi['last_activity_at'] = datetime.now()
 
             # Build SubmitSmPDU
-            SubmitSmPDU = self.opFactory.SubmitSM(
-                source_addr=None if b'from' not in updated_request.args else updated_request.args[b'from'][0],
-                destination_addr=updated_request.args[b'to'][0],
-                short_message=short_message,
-                data_coding=int(updated_request.args[b'coding'][0]),
-                custom_tlvs=normalize_custom_tlvs(updated_request.args[b'custom_tlvs'][0]))
+            try:
+                SubmitSmPDU = self.opFactory.SubmitSM(
+                    source_addr=None if b'from' not in updated_request.args else updated_request.args[b'from'][0],
+                    destination_addr=updated_request.args[b'to'][0],
+                    short_message=short_message,
+                    data_coding=int(updated_request.args[b'coding'][0]),
+                    custom_tlvs=normalize_custom_tlvs(updated_request.args[b'custom_tlvs'][0]))
+            except LongMessageExceedsMaxPartsError as e:
+                raise LongContentExceededError(str(e))
             self.log.debug("Built base SubmitSmPDU: %s", SubmitSmPDU)
 
             # Make Credential validation
@@ -359,6 +362,9 @@ class Send(Resource):
             # Send SubmitSmPDU through smpp client manager PB server
             self.log.debug("Connector '%s' is set to be a route for this SubmitSmPDU", routedConnector.cid)
             client_msgid = updated_request.args[b'msgid'][0].decode() if b'msgid' in updated_request.args else None
+            # The queue's expiry check reads this header, not the PDU, so omitting it leaves that check dead.
+            # Read off the PDU so an interceptor that rewrote it cannot leave header and PDU disagreeing.
+            expiration = routable.pdu.params.get('validity_period')
             # the dedup path does an async Redis SETNX, so the submit no longer always resolves synchronously
             c = yield self.SMPPClientManagerPB.perspective_submit_sm(
                 uid=user.uid,
@@ -366,6 +372,7 @@ class Send(Resource):
                 SubmitSmPDU=routable.pdu,
                 submit_sm_bill=bill,
                 priority=priority,
+                validity_period=None if expiration is None else str(expiration),
                 pickled=False,
                 dlr_url=dlr_url,
                 dlr_level=dlr_level,
@@ -385,14 +392,16 @@ class Send(Resource):
                 response = {'return': c, 'status': 200}
         except HttpApiError as e:
             self.log.error("Error: %s", e)
-            response = {'return': e.message, 'status': e.code}
+            response = {'return': e.message, 'status': e.code, 'token': e.token}
         except Exception as e:
             self.log.error("Error: %s", e)
-            response = {'return': "Unknown error: %s" % e, 'status': 500}
+            response = {'return': "Unknown error: %s" % e, 'status': 500, 'token': ServerError.token}
             raise
         finally:
             self.log.debug("Returning %s to %s.", response, updated_request.getClientIP())
             updated_request.setResponseCode(response['status'])
+            if 'token' in response:
+                updated_request.setHeader(ERROR_CODE_HEADER, response['token'])
 
             # Default return
             _return = 'Error "%s"' % response['return']
@@ -531,6 +540,7 @@ class Send(Resource):
 
             self.log.debug("Returning %s to %s.", response, updated_request.getClientIP())
             updated_request.setResponseCode(response['status'])
+            updated_request.setHeader(ERROR_CODE_HEADER, e.token)
 
             return b'Error "%s"' % (response['return'] if isinstance(response['return'], bytes) else response['return'].encode())
         except Exception as e:
@@ -539,6 +549,7 @@ class Send(Resource):
 
             self.log.debug("Returning %s to %s.", response, updated_request.getClientIP())
             updated_request.setResponseCode(response['status'])
+            updated_request.setHeader(ERROR_CODE_HEADER, ServerError.token)
 
             return b'Error "%s"' % response['return'].encode()
         else:

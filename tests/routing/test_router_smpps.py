@@ -2,7 +2,7 @@ import logging
 from unittest.mock import Mock
 import copy
 
-from twisted.internet import reactor, defer
+from twisted.internet import reactor, defer, task
 from twisted.cred import portal
 from twisted.test import proto_helpers
 from smpp.twisted.protocol import SMPPSessionStates
@@ -11,7 +11,9 @@ from smpp.pdu.operations import SubmitSM, DeliverSM, DataSM
 from smpp.pdu.pdu_types import RegisteredDelivery, RegisteredDeliveryReceipt, MessageState
 
 from jasmin.routing.proxies import RouterPBProxy
-from jasmin.routing.Routes import DefaultRoute
+from jasmin.routing.Routes import DefaultRoute, RandomRoundrobinMTRoute
+from jasmin.routing.Filters import GroupFilter
+from jasmin.routing.jasminApi import SmppClientConnector
 from jasmin.protocols.smpp.configs import SMPPServerConfig, SMPPClientConfig
 from jasmin.protocols.smpp.factory import SMPPServerFactory, SMPPClientFactory
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
@@ -301,6 +303,71 @@ class SubmitSmDeliveryTestCases(RouterPBProxy, SmppServerTestCases):
         self.assertTrue('message_id' not in response_pdu.params)
 
 
+class RandomRouteBindFilterTestCases(RouterPBProxy, SmppServerTestCases):
+    """The smpps ingress applies the same bind filter as the HTTP one. The spread itself is unit-covered by
+    test_Routes.getBoundConnector; what only this lane can show is that the filter is wired at this call site,
+    so an all-unbound pool is refused rather than enqueued against a connector that cannot deliver."""
+
+    @defer.inlineCallbacks
+    def test_random_route_refuses_when_no_connector_is_bound(self):
+        yield self.connect('127.0.0.1', self.pbPort)
+
+        g1 = Group(1)
+        yield self.group_add(g1)
+        self.u1 = User(1, g1, 'username', 'password')
+        yield self.user_add(self.u1)
+        yield self.mtroute_add(
+            RandomRoundrobinMTRoute(
+                [GroupFilter(g1)],
+                [SmppClientConnector('bound-one'), SmppClientConnector('unbound-one')],
+                0.0),
+            2)
+
+        yield self.SMPPClientManagerPBProxy.connect('127.0.0.1', self.CManagerPort)
+        # Neither connector reports a bound session.
+        self.clientManager_f.perspective_connector_details = Mock(return_value=False)
+
+        self._bind_smpps(self.u1)
+        self.smpps_proto.dataReceived(self.encoder.encode(self.SubmitSmPDU))
+
+        response_pdu = self.smpps_proto.sendPDU.call_args_list[0][0][0]
+        self.assertEqual(response_pdu.id, pdu_types.CommandId.submit_sm_resp)
+        # SubmitSmRoutingError carries RSUBMITFAIL; RINVDSTADR is the no-route-found class, a different refusal.
+        self.assertEqual(response_pdu.status, pdu_types.CommandStatus.ESME_RSUBMITFAIL)
+        # Refused before reaching the queue, rather than aged out silently against an unbound connector.
+        self.assertFalse(self.clientManager_f.perspective_submit_sm.called)
+
+    @defer.inlineCallbacks
+    def test_random_route_accepts_over_the_bound_connector(self):
+        # The refusal alone would stay green with the predicate stuck at False, which would refuse every
+        # random-route submit on this interface. The predicate is a separate copy of the HTTP one.
+        yield self.connect('127.0.0.1', self.pbPort)
+
+        g1 = Group(1)
+        yield self.group_add(g1)
+        self.u1 = User(1, g1, 'username', 'password')
+        yield self.user_add(self.u1)
+        yield self.mtroute_add(
+            RandomRoundrobinMTRoute(
+                [GroupFilter(g1)],
+                [SmppClientConnector('bound-one'), SmppClientConnector('unbound-one')],
+                0.0),
+            2)
+
+        yield self.SMPPClientManagerPBProxy.connect('127.0.0.1', self.CManagerPort)
+        self.clientManager_f.perspective_connector_details = Mock(
+            side_effect=lambda cid: {'session_state': 'BOUND_TRX'} if cid == 'bound-one' else False)
+        submitted = []
+        self.clientManager_f.perspective_submit_sm = Mock(
+            side_effect=lambda **kwargs: submitted.append(kwargs['cid']))
+
+        self._bind_smpps(self.u1)
+        self.smpps_proto.dataReceived(self.encoder.encode(self.SubmitSmPDU))
+
+        # Only one connector is bound, so the filtered choice is deterministic.
+        self.assertEqual(['bound-one'], submitted)
+
+
 class BillRequestSubmitSmRespCallbackingTestCases(RouterPBProxy, SmppServerTestCases,
                                                   SubmitSmTestCaseTools):
     @defer.inlineCallbacks
@@ -462,6 +529,33 @@ class SubmitSmRespDeliveryTestCases(RouterPBProxy, SMPPClientTestCases,
         yield SMPPClientTestCases.tearDown(self)
 
         yield self.ErrorOnSubmitSMSCPort.stopListening()
+
+    @defer.inlineCallbacks
+    def test_an_asynchronous_submit_still_answers_the_esme_rok(self):
+        """The submit answer must survive being asynchronous. Reading the submit's Deferred synchronously means
+        any awaited work on that path - a receipt-map write, a publisher confirm - turns every bound ESME's
+        submit into a routing error, and the code that added the await looks innocent."""
+        yield self.connect('127.0.0.1', self.pbPort)
+        yield self.prepareRoutingsAndStartConnector()
+        yield self.smppc_factory.connectAndBind()
+        self.smpps_factory.lastProto.sendPDU = Mock(wraps=self.smpps_factory.lastProto.sendPDU)
+
+        # Stands in for any awaited I/O added to the submit path: the answer arrives a reactor turn later.
+        submit = self.clientManager_f.perspective_submit_sm
+        self.clientManager_f.perspective_submit_sm = (
+            lambda *a, **kw: task.deferLater(reactor, 0, submit, *a, **kw))
+        try:
+            yield self.smppc_factory.lastProto.sendDataRequest(self.SubmitSmPDU)
+            yield waitFor(1)
+        finally:
+            self.clientManager_f.perspective_submit_sm = submit
+
+        yield self.smppc_factory.smpp.unbindAndDisconnect()
+        yield self.stopSmppClientConnectors()
+
+        response_pdu = self.smpps_factory.lastProto.sendPDU.call_args_list[0][0][0]
+        self.assertEqual(response_pdu.id, pdu_types.CommandId.submit_sm_resp)
+        self.assertEqual(response_pdu.status, pdu_types.CommandStatus.ESME_ROK)
 
     @defer.inlineCallbacks
     def test_receive_nothing_on_ESME_ROK(self):

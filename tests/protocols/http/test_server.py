@@ -1,5 +1,7 @@
 import json
+import re
 from datetime import datetime
+from dateutil import parser
 from unittest.mock import Mock
 
 from twisted.internet import defer
@@ -12,7 +14,7 @@ from jasmin.protocols.http.endpoints import send as send_module
 from jasmin.protocols.http.server import HTTPApi
 from smpp.pdu import smpp_time
 from jasmin.protocols.http.stats import HttpAPIStatsCollector
-from jasmin.routing.Filters import GroupFilter
+from jasmin.routing.Filters import GroupFilter, SourceAddrFilter
 from jasmin.routing.Routes import DefaultRoute, RandomRoundrobinMTRoute, StaticMTRoute
 from jasmin.routing.router import RouterPB
 from jasmin.routing.configs import RouterPBConfig
@@ -306,6 +308,47 @@ class SendTestCases(HTTPApiTestCases):
         # The consequence, not just the field: the encoder accepts it where the untruncated instant would raise.
         smpp_time.unparse_absolute_time(validity_period)
         self.assertRaises(ValueError, smpp_time.unparse_absolute_time, rejectingInstant)
+
+    @defer.inlineCallbacks
+    def test_validity_period_rides_the_amqp_expiration_header(self):
+        """The queue drops a message whose validity elapsed while it waited, but only if it can see the instant.
+
+        The consumer reads the expiration from the AMQP header, not from the PDU, and the header is only written
+        when the publish is given one. Passing the PDU alone leaves that discard unreachable, so a message that
+        outlived its validity in a backed-up queue is still submitted to the carrier whenever the queue drains.
+        """
+        submitted = []
+        self.clientManager_f.perspective_submit_sm = Mock(
+            side_effect=lambda **kwargs: submitted.append(kwargs))
+
+        params = {b'username': self.username,
+                  b'password': b'correct',
+                  b'to': b'06155423',
+                  b'content': 'anycontent',
+                  b'validity-period': 60}
+        yield self.web.post(b'send', params)
+
+        self.assertEqual(1, len(submitted))
+        expiration = submitted[0]['validity_period']
+        self.assertIsNotNone(expiration)
+        # The consumer parses the header with dateutil, so it must round-trip to the PDU's own instant.
+        self.assertEqual(parser.parse(expiration), submitted[0]['SubmitSmPDU'].params['validity_period'])
+
+    @defer.inlineCallbacks
+    def test_no_validity_period_sets_no_expiration_header(self):
+        """A submit naming no validity must not mint one: an absent window means unbounded, not expire-now."""
+        submitted = []
+        self.clientManager_f.perspective_submit_sm = Mock(
+            side_effect=lambda **kwargs: submitted.append(kwargs))
+
+        params = {b'username': self.username,
+                  b'password': b'correct',
+                  b'to': b'06155423',
+                  b'content': 'anycontent'}
+        yield self.web.post(b'send', params)
+
+        self.assertEqual(1, len(submitted))
+        self.assertIsNone(submitted[0]['validity_period'])
 
     def routeOverTwoConnectors(self):
         """Replace the default route with a random pool of two connectors, and report neither as bound."""
@@ -606,6 +649,89 @@ class RateTestCases(HTTPApiTestCases):
 
             self.assertEqual(response.responseCode, 400)
             self.assertEqual(response.value(), ('"Argument [tags] has an invalid value: [%s]."' % params['tags']).encode())
+
+
+class RateSourceAddrTestCases(HTTPApiTestCases):
+    """/rate must price the message /send would actually submit. Its PDU was built with a misspelled keyword,
+    which SubmitSM(**kwargs) swallowed silently, so the from-address never reached the PDU being priced and any
+    routing or credential rule keyed on the sender saw nothing."""
+
+    @defer.inlineCallbacks
+    def test_the_from_address_reaches_the_priced_pdu(self):
+        rate = self.web.resource.children[b'rate']
+        built = []
+        SubmitSM = rate.opFactory.SubmitSM
+        rate.opFactory.SubmitSM = lambda **kw: built.append(kw) or SubmitSM(**kw)
+        try:
+            response = yield self.web.get(b"rate", {b'username': 'nathalie',
+                                                    b'password': b'correct',
+                                                    b'from': b'999',
+                                                    b'to': b'06155423'})
+        finally:
+            rate.opFactory.SubmitSM = SubmitSM
+
+        self.assertEqual(response.responseCode, 200)
+        # A misspelled keyword is accepted and dropped by **kwargs, so the assertion is on the name itself.
+        self.assertEqual(built[0].get('source_addr'), b'999')
+
+
+class RateSegmentationTestCases(HTTPApiTestCases):
+    """It never applied the GSM 03.38 conversion, so it counted segments over raw UTF-8 bytes and could quote a
+    different number of segments than the send it is quoting for."""
+
+    @defer.inlineCallbacks
+    def test_segments_are_counted_over_gsm_not_raw_utf8(self):
+        # 160 septets in GSM 03.38, but 320 bytes as UTF-8, which would be counted as more than one segment.
+        response = yield self.web.get(b"rate", {b'username': 'nathalie',
+                                                b'password': b'correct',
+                                                b'to': b'06155423',
+                                                b'coding': b'0',
+                                                b'content': 'é' * 160})
+
+        self.assertEqual(response.responseCode, 200)
+        self.assertEqual(json.loads(response.value())['submit_sm_count'], 1)
+
+
+class ErrorCodeHeaderTestCases(HTTPApiTestCases):
+    """The status alone is ambiguous - 403 covers authentication, charging and throughput - so every error
+    answer carries the machine-readable name too, on every endpoint and every path."""
+
+    def _token(self, response):
+        header = response.responseHeaders.getRawHeaders(b'jasmin-error-code')
+        return None if header is None else header[0]
+
+    @defer.inlineCallbacks
+    def test_rate_authentication_failure_names_itself(self):
+        response = yield self.web.get(b"rate", {b'username': 'nathalie',
+                                                b'password': b'wrong',
+                                                b'to': b'06155423'})
+
+        self.assertEqual(response.responseCode, 403)
+        self.assertEqual(self._token(response), b'authentication_failed')
+
+    @defer.inlineCallbacks
+    def test_rate_missing_argument_names_itself(self):
+        response = yield self.web.get(b"rate", {b'username': 'nathalie',
+                                                b'to': b'06155423'})
+
+        self.assertEqual(response.responseCode, 400)
+        self.assertEqual(self._token(response), b'invalid_args')
+
+    @defer.inlineCallbacks
+    def test_balance_authentication_failure_names_itself(self):
+        response = yield self.web.get(b"balance", {b'username': 'nathalie',
+                                                   b'password': b'wrong'})
+
+        self.assertEqual(response.responseCode, 403)
+        self.assertEqual(self._token(response), b'authentication_failed')
+
+    @defer.inlineCallbacks
+    def test_a_successful_answer_carries_no_error_name(self):
+        response = yield self.web.get(b"balance", {b'username': 'nathalie',
+                                                   b'password': b'correct'})
+
+        self.assertEqual(response.responseCode, 200)
+        self.assertIsNone(self._token(response))
 
 
 class BalanceTestCases(HTTPApiTestCases):

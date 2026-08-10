@@ -6,6 +6,8 @@ from twisted.web.client import Agent
 from treq import text_content
 from treq.client import HTTPClient
 
+from jasmin.managers.configs import DLRLookupConfig
+from jasmin.managers.dlr import DLRLookup
 from tests.routing.http_server import AckServer
 from tests.routing.test_router import HappySMSCTestCase, SubmitSmTestCaseTools
 from tests.routing.test_routing_submit_sm_and_dlr import waitFor
@@ -146,6 +148,36 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         self.assertEqual(r['level'], 1)
 
     @defer.inlineCallbacks
+    def test_deliver_path_forward_survives_target_queue_outage(self):
+        # The level-2 forward runs in deliver_sm_dlr_callback, whose ForwardError branch is a separate mirror of
+        # the resp path's; the level-1 outage test above never reaches it.
+        self.dlrlookup.config.dlr_lookup_retry_delay = 1
+
+        msgId = yield self._send(dlr_level=3)
+        yield waitFor(2)  # level1 lands while the target still exists
+        yield self._drain_forwards()  # so the record surviving below can only be the level2 one
+
+        yield self.amqpBroker.chan.queue_delete(queue=self.forward_queue)
+        yield self.SMSCPort.factory.lastClient.trigger_DLR()
+        yield waitFor(2)  # level2 attempted while the target is absent -> unroutable -> requeued
+
+        yield self.amqpBroker.chan.queue_declare(queue=self.forward_queue, durable=True)
+
+        r = None
+        for _ in range(6):
+            yield waitFor(1)
+            candidate = yield self._get_forward()
+            if candidate is not None and candidate['level'] == 2:
+                r = candidate
+                break
+        yield self.stopSmppClientConnectors()
+
+        self.assertIsNotNone(r)  # terminal receipt survived the outage
+        self.assertEqual(r['msgid'], msgId)
+        self.assertEqual(r['level'], 2)
+        self.assertEqual(r['message_state'], 'DELIVRD')
+
+    @defer.inlineCallbacks
     def test_unknown_msgid_receipt_is_dropped_and_pipeline_survives(self):
         # A spurious receipt for a message the engine never submitted (an unmapped smpp id) is not forwarded, and it
         # must not stall the DLR consumer: a following valid receipt still forwards.
@@ -186,3 +218,35 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         yield self.stopSmppClientConnectors()
 
         self.assertIsNone((yield self._get_forward()))
+
+
+class DlrForwardQueueDeclarationTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCaseTools):
+    """subscribe() declares the configured forward queue itself, so an outcome published before any consumer
+    binds is buffered rather than returned unroutable. The sibling cases declare the queue in their own setUp,
+    which would keep this passing with the declaration removed."""
+
+    declared_queue = 'test.dlr.forward.declared'
+    probe_pid = 'forward-declaration'
+
+    @defer.inlineCallbacks
+    def tearDown(self):
+        yield self.amqpBroker.chan.queue_delete(queue=self.declared_queue)
+        yield self.amqpBroker.chan.queue_delete(queue='DLRLookup-%s' % self.probe_pid)
+        yield HappySMSCTestCase.tearDown(self)
+
+    @defer.inlineCallbacks
+    def test_subscribe_declares_the_forward_queue(self):
+        config = DLRLookupConfig()
+        # A distinct pid keeps this consumer off the harness's own DLRLookup-<pid> queue.
+        config.pid = self.probe_pid
+        config.dlr_forward_queue = self.declared_queue
+        lookup = DLRLookup(config, self.amqpBroker, self.redisClient)
+        yield lookup.subscribe()
+
+        # The forward publishes to the default exchange with mandatory=True, so an undeclared queue comes back
+        # unroutable and raises: nothing else in this test declares it.
+        yield lookup.forward_outcome(msgid='forward-declaration-probe', level=1, message_state='ESME_ROK')
+
+        buffered = yield self.amqpBroker.chan.basic_get(queue=self.declared_queue, auto_ack=True)
+        self.assertIsNotNone(buffered)
+        self.assertEqual('forward-declaration-probe', json.loads(buffered.body)['msgid'])

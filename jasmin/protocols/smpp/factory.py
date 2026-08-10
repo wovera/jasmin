@@ -339,6 +339,7 @@ class SMPPServerFactory(_SMPPServerFactory):
         else:
             return self.submit_sm_post_interception(routable=routable, system_id=system_id, proto=proto)
 
+    @defer.inlineCallbacks
     def submit_sm_post_interception(self, *args, **kw):
         """This event handler will deliver the submit_sm to the right smppc connector.
         Note that Jasmin deliver submit_sm messages like this:
@@ -487,29 +488,28 @@ class SMPPServerFactory(_SMPPServerFactory):
             ########################################################
             # Send SubmitSmPDU through smpp client manager PB server
             self.log.debug("Connector '%s' is set to be a route for this SubmitSmPDU", routedConnector.cid)
-            c = self.SMPPClientManagerPB.perspective_submit_sm(
-                uid=routable.user.uid,
-                cid=routedConnector.cid,
-                SubmitSmPDU=routable.pdu,
-                submit_sm_bill=bill,
-                priority=priority,
-                pickled=False,
-                source_connector=proto)
+            # Awaited, so the submit may do real I/O before answering. Reading its Deferred synchronously
+            # made any await on that path answer every bound ESME a routing error.
+            try:
+                c = yield self.SMPPClientManagerPB.perspective_submit_sm(
+                    uid=routable.user.uid,
+                    cid=routedConnector.cid,
+                    SubmitSmPDU=routable.pdu,
+                    submit_sm_bill=bill,
+                    priority=priority,
+                    pickled=False,
+                    source_connector=proto)
+            except Exception as e:
+                self.log.error('Failed to send SubmitSmPDU to [cid:%s]: %s', routedConnector.cid, e)
+                raise SubmitSmRoutingError()
 
-            if not hasattr(c, 'result'):
+            # The submit answers False on its own refusal paths, which is not a message id.
+            if not c:
                 self.log.error('Failed to send SubmitSmPDU to [cid:%s], got: %s', routedConnector.cid, c)
                 raise SubmitSmRoutingError()
 
-            # Build final response
-            # A failed submit Deferred carries a Failure in .result, which is truthy: guard against it
-            # explicitly so an errored submit (e.g. a broker publish failure) is rejected instead of being
-            # treated as a successful submit.
-            if not c.result or isinstance(c.result, Failure):
-                self.log.error('Failed to send SubmitSmPDU to [cid:%s]: %s', routedConnector.cid, c.result)
-                raise SubmitSmRoutingError()
-
             # Otherwise, message_id is defined on ESME_ROK
-            message_id = c.result
+            message_id = c
         except (SubmitSmInterceptionError, SubmitSmInterceptionSuccess, InterceptorRunError,
                 SubmitSmRouteNotFoundError, SubmitSmThroughputExceededError, SubmitSmChargingError,
                 SubmitSmRoutingError) as e:

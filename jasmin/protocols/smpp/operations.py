@@ -23,6 +23,15 @@ from smpp.pdu.pdu_types import (EsmClass, EsmClassMode, EsmClassType, EsmClassGs
 # Both patches are idempotent.
 install_pdu_encoder_patch()
 install_pdu_decoder_patch()
+
+
+class LongMessageExceedsMaxPartsError(Exception):
+    """Raised when a message segments into more parts than the connector is configured to send."""
+
+    def __init__(self, segmentCount, maxParts):
+        Exception.__init__(self, 'Message needs %s segments, exceeding the %s allowed' % (segmentCount, maxParts))
+        self.segmentCount = segmentCount
+        self.maxParts = maxParts
 install_sendpdu_wire_logger()  # opt-in via env JASMIN_TLV_WIRE_LOG=1
 
 message_state_map = {
@@ -226,9 +235,10 @@ class SMPPOperationFactory:
             # count the SAR/UDH headers advertise has to come from the split rather than from dividing the length.
             segments = self._splitLongMessage(longMessage, slicedMaxSmLength, bits)
             total_segments = len(segments)
-            # Obey to configured longContentMaxParts
+            # Refused rather than capped: sending the first N segments puts a message on the handset that is
+            # silently missing its tail, with nothing anywhere reporting the loss.
             if total_segments > self.long_content_max_parts:
-                total_segments = self.long_content_max_parts
+                raise LongMessageExceedsMaxPartsError(total_segments, self.long_content_max_parts)
 
             msg_ref_num = self.claimLongMsgRefNum()
 

@@ -11,6 +11,7 @@ import uuid
 from twisted.internet import defer, reactor
 from twisted.trial.unittest import TestCase
 from pika.exceptions import ConsumerCancelled
+from twisted.internet.error import ConnectionDone
 
 from jasmin.queues.configs import AmqpConfig
 from jasmin.queues.content import Content
@@ -435,3 +436,78 @@ class RejectAndRequeueTestCase(ConsumeTools):
         self.assertEqual(self.consumedMessages, 50)
 
         yield self.amqp.disconnect()
+
+
+class ReconnectConsumeTestCase(ConsumeTools):
+    """A dropped TCP connection is not a deliberate disconnect: the broker and the queue survive it, and the
+    control channel is reopened, so publishing recovers on its own. A consumer's channel dies with the
+    connection, so unless it is told to re-subscribe the queue keeps filling with nothing draining it."""
+
+    configArgs = dict(AmqpTestCase.configArgs, reconnectOnConnectionLoss=True)
+    queue_name = 'submit.sm.test_reconnect_consume'
+
+    def setUp(self):
+        AmqpTestCase.setUp(self)
+        self.config.reconnectOnConnectionLossDelay = 1
+
+    def _errback(self, error):
+        # Dropping the connection is this test's act, so the pending get() errbacks by design.
+        if error.check(ConnectionDone) is not None:
+            return None
+        return ConsumeTools._errback(self, error)
+
+    @defer.inlineCallbacks
+    def _subscribe(self):
+        yield self.amqp.named_queue_declare(queue=self.queue_name)
+        queue, _consumer_tag = yield self.amqp.chan.basic_consume(queue=self.queue_name, auto_ack=True)
+        queue.get().addCallback(self._callback, queue).addErrback(self._errback)
+
+    @defer.inlineCallbacks
+    def test_consumer_is_re_established_after_an_unexpected_connection_loss(self):
+        yield self.connect()
+        self.amqp.addChannelReadyCallback(self._subscribe)
+        yield self._subscribe()
+
+        # Drop the transport rather than calling disconnect(): only the unexpected path exercises reconnection,
+        # and disconnect() resets the readiness signal that the unexpected path must reset for itself.
+        self.amqp.client.transport.loseConnection()
+        yield waitFor(4)
+
+        yield self.amqp.publish(routing_key=self.queue_name, content=Content(self.message))
+        yield waitFor(2)
+
+        self._stop = True
+        # With reconnection enabled a plain disconnect only triggers another reconnect, so the exit signal
+        # never fires; the factory's own lever for a final teardown is the one that stops retrying first.
+        yield self.amqp.disconnectAndDontRetryToConnect()
+
+        self.assertEqual(self.consumedMessages, 1)
+
+
+class ChannelReadyCallbackTestCase(AmqpTestCase):
+    """A consumer re-registers from inside the subscribe path the callback itself re-runs, so registration has
+    to be idempotent. Registering twice would open a second channel and consumer on the same queue on every
+    later connection, leaving two consumers competing for one queue."""
+
+    class Consumer:
+        def subscribe(self):
+            pass
+
+    def test_registering_the_same_callback_twice_registers_it_once(self):
+        # A bound method, because that is what every registrant passes: `self.subscribe` builds a NEW object on
+        # each access, so identity-based dedup would silently stack a consumer per reconnect.
+        consumer = self.Consumer()
+
+        amqp = AmqpFactory(self.config)
+        amqp.addChannelReadyCallback(consumer.subscribe)
+        amqp.addChannelReadyCallback(consumer.subscribe)
+
+        self.assertEqual(len(amqp.channelReadyCallbacks), 1)
+
+    def test_the_same_method_on_two_instances_registers_both(self):
+        # Dedup must not collapse distinct consumers: DLRLookup and each Thrower register the same method name.
+        amqp = AmqpFactory(self.config)
+        amqp.addChannelReadyCallback(self.Consumer().subscribe)
+        amqp.addChannelReadyCallback(self.Consumer().subscribe)
+
+        self.assertEqual(len(amqp.channelReadyCallbacks), 2)

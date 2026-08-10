@@ -74,8 +74,25 @@ class SMPPClientManagerPB(pb.Avatar):
 
     def addAmqpBroker(self, amqpBroker):
         self.amqpBroker = amqpBroker
+        self.amqpBroker.addChannelReadyCallback(self.reconsumeRunningConnectors)
 
         self.log.info('Added amqpBroker to SMPPClientManagerPB')
+
+    @defer.inlineCallbacks
+    def reconsumeRunningConnectors(self):
+        """A connector's channel dies with the AMQP connection and a broker restart takes the topology with it,
+        so a reconnect must redeclare and reconsume or the queue fills with nothing draining it."""
+        for connector in self.connectors:
+            if connector['service'].running != 1:
+                continue
+
+            try:
+                connector['chan'] = yield self.setupConnectorChannel(connector['id'])
+                connector['consumer_tag'] = None
+                yield self.consumeSubmitSmQueue(connector)
+            except Exception as e:
+                # Swallowed so one connector cannot strand the others still to be resumed.
+                self.log.error('Could not resume consuming for connector [%s]: %s', connector['id'], e)
 
     def addRedisClient(self, redisClient):
         self.redisClient = redisClient
@@ -242,24 +259,7 @@ class SMPPClientManagerPB(pb.Avatar):
             self.log.error('AMQP Broker channel is not yet ready')
             defer.returnValue(False)
 
-        # This connector's own channel isolates its delivery-tag space, so acks/rejects go back on the
-        # channel that delivered the message.
-        chan = yield self.amqpBroker.newChannel()
-
-        # Fix prefetch limit per consumer to 1 to get correct throttling
-        yield chan.basic_qos(prefetch_count=1)
-
-        # Declare queues
-        # First declare the messaging exchange (has no effect if its already declared)
-        yield chan.exchange_declare(exchange='messaging', exchange_type='topic')
-        # submit.sm queue declaration and binding
-        submit_sm_queue = 'submit.sm.%s' % c.id
-        routing_key = 'submit.sm.%s' % c.id
-        self.log.info('Binding %s queue to %s route_key', submit_sm_queue, routing_key)
-        yield self.amqpBroker.named_queue_declare(queue=submit_sm_queue)
-        yield chan.queue_bind(queue=submit_sm_queue,
-                              exchange="messaging",
-                              routing_key=routing_key)
+        chan = yield self.setupConnectorChannel(c.id)
 
         # Instanciate smpp client service manager
         serviceManager = SMPPClientService(c, self.config)
@@ -368,13 +368,45 @@ class SMPPClientManagerPB(pb.Avatar):
 
         connector['service'].startService()
 
-        # Start the queue consumer
+        if not (yield self.consumeSubmitSmQueue(connector)):
+            defer.returnValue(False)
+
+        self.log.info('Started connector [%s]', cid)
+
+        # Set persistance state to False (pending for persistance)
+        self.persisted = False
+
+        defer.returnValue(True)
+
+    @defer.inlineCallbacks
+    def setupConnectorChannel(self, cid):
+        """The connector's own channel isolates its delivery-tag space, so acks/rejects go back on the channel
+        that delivered the message. Re-run on every connection: a broker restart loses exchange and queue."""
+        chan = yield self.amqpBroker.newChannel()
+
+        # Fix prefetch limit per consumer to 1 to get correct throttling
+        yield chan.basic_qos(prefetch_count=1)
+
+        # Declare queues
+        # First declare the messaging exchange (has no effect if its already declared)
+        yield chan.exchange_declare(exchange='messaging', exchange_type='topic')
+        # submit.sm queue declaration and binding
+        submit_sm_queue = 'submit.sm.%s' % cid
+        routing_key = 'submit.sm.%s' % cid
+        self.log.info('Binding %s queue to %s route_key', submit_sm_queue, routing_key)
+        yield self.amqpBroker.named_queue_declare(queue=submit_sm_queue)
+        yield chan.queue_bind(queue=submit_sm_queue,
+                              exchange="messaging",
+                              routing_key=routing_key)
+
+        defer.returnValue(chan)
+
+    @defer.inlineCallbacks
+    def consumeSubmitSmQueue(self, connector):
+        cid = connector['id']
         self.log.debug('Starting submit_sm_q consumer in connector [%s]', cid)
 
-        # Subscribe to submit.sm.%cid queue
-        # check jasmin.queues.test.test_amqp.PublishConsumeTestCase.test_simple_publish_consume_by_topic
-        submit_sm_queue = 'submit.sm.%s' % connector['id']
-
+        submit_sm_queue = 'submit.sm.%s' % cid
         chan = connector['chan']
 
         try:
@@ -400,15 +432,9 @@ class SMPPClientManagerPB(pb.Avatar):
         d.addCallback(lambda received: sm_listener.submit_sm_callback(DeliveryMessage(received))).addErrback(
             sm_listener.submit_sm_errback)
 
-        self.log.info('Started connector [%s]', cid)
-
-        # Set connector data
         connector['sm_listener'].setSubmitSmQ(submit_sm_q)
         connector['consumer_tag'] = consumerTag
         connector['submit_sm_q'] = submit_sm_q
-
-        # Set persistance state to False (pending for persistance)
-        self.persisted = False
 
         defer.returnValue(True)
 
@@ -599,79 +625,81 @@ class SMPPClientManagerPB(pb.Avatar):
                 self.log.info('Idempotent submit [msgid:%s] deduplicated; replaying original accept', msgid)
                 defer.returnValue(msgid)
 
-        # Publishing a pickled PDU
-        self.log.debug('Publishing SubmitSmPDU with routing_key=%s, priority=%s', pubQueueName, priority)
-        c = SubmitSmContent(
-            uid=uid,
-            body=PickledSubmitSmPDU,
-            replyto=responseQueueName,
-            submit_sm_bill=submit_sm_bill,
-            priority=priority,
-            expiration=validity_period,
-            msgid=msgid,
-            source_connector='httpapi' if source_connector == 'httpapi' else 'smppsapi',
-            destination_cid=cid)
         try:
+            # Publishing a pickled PDU
+            self.log.debug('Publishing SubmitSmPDU with routing_key=%s, priority=%s', pubQueueName, priority)
+            c = SubmitSmContent(
+                uid=uid,
+                body=PickledSubmitSmPDU,
+                replyto=responseQueueName,
+                submit_sm_bill=submit_sm_bill,
+                priority=priority,
+                expiration=validity_period,
+                msgid=msgid,
+                source_connector='httpapi' if source_connector == 'httpapi' else 'smppsapi',
+                destination_cid=cid)
+            # Written before the publish, and awaited on both ingresses: the SMSC round trip can complete
+            # before a write issued after it lands, and a submit_sm_resp that finds no map is discarded, taking
+            # the receipt chain with it.
+            if source_connector == 'httpapi' and dlr_level in [1, 2, 3]:
+                # A requested receipt (dlr_level > 0) enqueues the redis 'dlr' map regardless of dlr_url: the map also
+                # drives the AMQP outcome forwarder, which must fire for a url-less receipt request too.
+                if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
+                    self.log.warning("DLR is not enqueued for SubmitSmPDU [msgid:%s], RC is not connected.",
+                                  c.properties['message-id'])
+                else:
+                    self.log.debug('Setting DLR url (%s) and level (%s) for message id:%s, expiring in %s',
+                                   dlr_url,
+                                   dlr_level,
+                                   c.properties['message-id'],
+                                   connector['config'].dlr_expiry)
+                    # Set values and callback expiration setting
+                    hashKey = "dlr:%s" % (c.properties['message-id'])
+                    hashValues = {'sc': 'httpapi',
+                                  'url': dlr_url if dlr_url is not None else '',
+                                  'level': dlr_level,
+                                  'method': dlr_method,
+                                  'connector': dlr_connector,
+                                  'expiry': connector['config'].dlr_expiry}
+                    yield self.redisClient.hmset(hashKey, hashValues)
+                    yield self.redisClient.expire(hashKey, connector['config'].dlr_expiry)
+            elif (isinstance(source_connector, SMPPServerProtocol) and
+                  SubmitSmPDU.params['registered_delivery'].receipt != RegisteredDeliveryReceipt.NO_SMSC_DELIVERY_RECEIPT_REQUESTED):
+                # If submit_sm is successfully sent from a SMPPServerProtocol connector and DLR is
+                # requested, then map message-id to the source_connector to permit related deliver_sm
+                # messages holding further receipts to be sent back to the right connector
+                if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
+                    self.log.warning("SMPPs mapping is not done for SubmitSmPDU [msgid:%s], RC is not connected.",
+                                  c.properties['message-id'])
+                else:
+                    self.log.debug(
+                        'Setting SMPPs connector (%s) mapping for msgid:%s, registered_dlr: %s, expiring in %s',
+                        source_connector.system_id,
+                        c.properties['message-id'],
+                        SubmitSmPDU.params['registered_delivery'],
+                        source_connector.factory.config.dlr_expiry)
+                    # Set values and callback expiration setting
+                    hashKey = "dlr:%s" % (c.properties['message-id'])
+                    hashValues = {'sc': 'smppsapi',
+                                  'system_id': source_connector.system_id,
+                                  'source_addr_ton': SubmitSmPDU.params['source_addr_ton'],
+                                  'source_addr_npi': SubmitSmPDU.params['source_addr_npi'],
+                                  'source_addr': SubmitSmPDU.params['source_addr'],
+                                  'dest_addr_ton': SubmitSmPDU.params['dest_addr_ton'],
+                                  'dest_addr_npi': SubmitSmPDU.params['dest_addr_npi'],
+                                  'destination_addr': SubmitSmPDU.params['destination_addr'],
+                                  'sub_date': datetime.datetime.now(),
+                                  'rd_receipt': SubmitSmPDU.params['registered_delivery'].receipt,
+                                  'expiry': source_connector.factory.config.dlr_expiry}
+                    yield self.redisClient.hmset(hashKey, hashValues)
+                    yield self.redisClient.expire(hashKey, source_connector.factory.config.dlr_expiry)
+
             yield self.amqpBroker.publish(exchange='messaging', routing_key=pubQueueName, content=c)
         except Exception:
-            # release the claim on publish failure so a retry re-enqueues instead of replaying a never-queued accept
+            # Release the claim on ANY post-claim failure, not only a failed publish: left held, the caller's
+            # retry is answered "already accepted" for a message that never reached the queue.
             if idem_key is not None:
                 yield self.redisClient.delete(idem_key)
             raise
-
-        if source_connector == 'httpapi' and dlr_level in [1, 2, 3]:
-            # A requested receipt (dlr_level > 0) enqueues the redis 'dlr' map regardless of dlr_url: the map also
-            # drives the AMQP outcome forwarder, which must fire for a url-less receipt request too.
-            if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
-                self.log.warning("DLR is not enqueued for SubmitSmPDU [msgid:%s], RC is not connected.",
-                              c.properties['message-id'])
-            else:
-                self.log.debug('Setting DLR url (%s) and level (%s) for message id:%s, expiring in %s',
-                               dlr_url,
-                               dlr_level,
-                               c.properties['message-id'],
-                               connector['config'].dlr_expiry)
-                # Set values and callback expiration setting
-                hashKey = "dlr:%s" % (c.properties['message-id'])
-                hashValues = {'sc': 'httpapi',
-                              'url': dlr_url if dlr_url is not None else '',
-                              'level': dlr_level,
-                              'method': dlr_method,
-                              'connector': dlr_connector,
-                              'expiry': connector['config'].dlr_expiry}
-                self.redisClient.hmset(hashKey, hashValues).addCallback(
-                    lambda response: self.redisClient.expire(
-                        hashKey, connector['config'].dlr_expiry))
-        elif (isinstance(source_connector, SMPPServerProtocol) and
-              SubmitSmPDU.params['registered_delivery'].receipt != RegisteredDeliveryReceipt.NO_SMSC_DELIVERY_RECEIPT_REQUESTED):
-            # If submit_sm is successfully sent from a SMPPServerProtocol connector and DLR is
-            # requested, then map message-id to the source_connector to permit related deliver_sm
-            # messages holding further receipts to be sent back to the right connector
-            if self.redisClient is None or str(self.redisClient) == '<Redis Connection: Not connected>':
-                self.log.warning("SMPPs mapping is not done for SubmitSmPDU [msgid:%s], RC is not connected.",
-                              c.properties['message-id'])
-            else:
-                self.log.debug(
-                    'Setting SMPPs connector (%s) mapping for msgid:%s, registered_dlr: %s, expiring in %s',
-                    source_connector.system_id,
-                    c.properties['message-id'],
-                    SubmitSmPDU.params['registered_delivery'],
-                    source_connector.factory.config.dlr_expiry)
-                # Set values and callback expiration setting
-                hashKey = "dlr:%s" % (c.properties['message-id'])
-                hashValues = {'sc': 'smppsapi',
-                              'system_id': source_connector.system_id,
-                              'source_addr_ton': SubmitSmPDU.params['source_addr_ton'],
-                              'source_addr_npi': SubmitSmPDU.params['source_addr_npi'],
-                              'source_addr': SubmitSmPDU.params['source_addr'],
-                              'dest_addr_ton': SubmitSmPDU.params['dest_addr_ton'],
-                              'dest_addr_npi': SubmitSmPDU.params['dest_addr_npi'],
-                              'destination_addr': SubmitSmPDU.params['destination_addr'],
-                              'sub_date': datetime.datetime.now(),
-                              'rd_receipt': SubmitSmPDU.params['registered_delivery'].receipt,
-                              'expiry': source_connector.factory.config.dlr_expiry}
-                self.redisClient.hmset(hashKey, hashValues).addCallback(
-                    lambda response: self.redisClient.expire(
-                        hashKey, source_connector.factory.config.dlr_expiry))
 
         defer.returnValue(c.properties['message-id'])

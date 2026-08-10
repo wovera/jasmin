@@ -168,6 +168,10 @@ class Thrower(Service):
             yield self.amqpBroker.channelReady
             self.log.info("AMQP Broker channel is ready now, let's go !")
 
+        yield self.subscribe()
+
+    @defer.inlineCallbacks
+    def subscribe(self):
         # Declare exchange, queue and start consuming to self.callback
         self.chan = yield self.amqpBroker.newChannel()
         yield self.chan.exchange_declare(exchange=self.exchangeName,
@@ -180,6 +184,10 @@ class Thrower(Service):
             queue=self.queueName, auto_ack=False, consumer_tag=self.consumerTag)
         self.thrower_q.get().addCallback(self._on_message).addErrback(self.errback)
         self.log.info('Consuming from routing key: %s', self.routingKey)
+
+        # Re-run on every later connection: this channel and its consumer die with the connection, and a broker
+        # restart takes the queue too, so what should be thrown would sit unattended.
+        self.amqpBroker.addChannelReadyCallback(self.subscribe)
 
     @defer.inlineCallbacks
     def rejectAndRequeueMessage(self, message, delay=True):

@@ -5,7 +5,7 @@ import json
 from twisted.web.resource import Resource
 
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
-from jasmin.protocols.http.errors import HttpApiError
+from jasmin.protocols.http.errors import HttpApiError, ServerError, ERROR_CODE_HEADER
 from jasmin.protocols.http.endpoints import authenticate_user
 
 
@@ -70,10 +70,10 @@ class Balance(Resource):
             response = {'return': {'balance': balance, 'sms_count': sms_count}, 'status': 200}
         except HttpApiError as e:
             self.log.error("Error: %s", e)
-            response = {'return': e.message, 'status': e.code}
+            response = {'return': e.message, 'status': e.code, 'token': e.token}
         except Exception as e:
             self.log.error("Error: %s", e)
-            response = {'return': "Unknown error: %s" % e, 'status': 500}
+            response = {'return': "Unknown error: %s" % e, 'status': 500, 'token': ServerError.token}
         finally:
             self.log.debug("Returning %s to %s.", response, request.getClientIP())
 
@@ -83,6 +83,8 @@ class Balance(Resource):
                 request.setResponseCode(500)
             else:
                 request.setResponseCode(response['status'])
+            if 'token' in response:
+                request.setHeader(ERROR_CODE_HEADER, response['token'])
             if isinstance(response['return'], bytes):
                 return json.dumps(response['return'].decode()).encode()
             return json.dumps(response['return']).encode()

@@ -105,6 +105,10 @@ class DLRLookup:
             yield self.amqpBroker.named_queue_declare(
                 queue=self.config.dlr_forward_queue, durable=True)
 
+        # Re-run on every later connection: this channel and its consumer die with the connection, and a broker
+        # restart takes the queue too, so receipts would pile up with nothing looking them up.
+        self.amqpBroker.addChannelReadyCallback(self.subscribe)
+
     def clearRequeueTimer(self, msgid):
         if msgid in self.requeue_timers:
             try:

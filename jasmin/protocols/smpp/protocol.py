@@ -25,6 +25,20 @@ from .error import *
 # @todo: LOG_CATEGORY seems to be unused, check before removing it
 LOG_CATEGORY = "smpp.twisted.protocol"
 
+# SMPP v3.4 §5.1.4: the allowed sequence_number range is 0x00000001 to 0x7FFFFFFF. The header encoder accepts
+# the full 0xFFFFFFFF, so running past the ceiling puts off-spec numbers on the wire raising nothing, and only
+# fails at 2^32, where the encoder's ValueError reaches a generic handler that discards the message.
+MAX_SEQ_NUM = 0x7FFFFFFF
+
+
+def wrapSeqNumAtCeiling(protocol):
+    """Wrap the counter so the next claim restarts at 1. Colliding with a still-open transaction needs one
+    outstanding for the whole cycle, far beyond the response timeout that bounds every transaction. It is not
+    made safe by the collision check: doSendRequest sends before it registers, so a duplicate would reach the
+    wire and the SMSC's reply would resolve the older transaction."""
+    if protocol.lastSeqNum >= MAX_SEQ_NUM:
+        protocol.lastSeqNum = 0
+
 
 class SMPPClientProtocol(twistedSMPPClientProtocol):
     def __init__(self):
@@ -104,6 +118,7 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
             self.factory.stats.inc('submit_sm_request_count')
 
     def claimSeqNum(self):
+        wrapSeqNumAtCeiling(self)
         seqNum = twistedSMPPClientProtocol.claimSeqNum(self)
 
         self.factory.stats.set('last_seqNum_at', datetime.now())
@@ -376,6 +391,10 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
         self.bind_type = None
         self.session_id = str(uuid.uuid4())
         self.log = logging.getLogger(LOG_CATEGORY)
+
+    def claimSeqNum(self):
+        wrapSeqNumAtCeiling(self)
+        return twistedSMPPServerProtocol.claimSeqNum(self)
 
     def PDUReceived(self, pdu):
         self.log.debug(

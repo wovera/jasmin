@@ -28,6 +28,7 @@ class AmqpFactory(ClientFactory):
         self.client = None  # the pika connection (TwistedProtocolConnection), set in buildProtocol
         self.chan = None  # the control channel (declares + publishes); consumers get their own via newChannel()
         self.queues = []
+        self.channelReadyCallbacks = []
 
         self._params = pika.ConnectionParameters(
             host=config.host,
@@ -56,7 +57,7 @@ class AmqpFactory(ClientFactory):
         directly when jasmin runs as a twistd plugin."""
         self.connectionRetry = True
         self.exitDeferred = defer.Deferred()
-        if self.channelReady is None or self.channelReady is False:
+        if self.channelReady is None or self.channelReady is False or self.channelReady.called:
             self.channelReady = defer.Deferred()
         if self.connectDeferred is None or self.connectDeferred.called:
             self.connectDeferred = defer.Deferred()
@@ -69,8 +70,16 @@ class AmqpFactory(ClientFactory):
         return self.exitDeferred
 
     def getChannelReadyDeferred(self):
-        """Notified when the control channel is open and ready."""
+        """Notified when the control channel is open and ready. Fresh per connection, so a caller holding a
+        spent one is holding the previous connection's signal."""
         return self.channelReady
+
+    def addChannelReadyCallback(self, callback):
+        """Invoked on every connection, including reconnections. A consumer's channel dies with the
+        connection, so subscribing once at boot leaves the queue filling with nothing draining it. Registering
+        is idempotent, so a consumer may re-register from inside its own subscribe path."""
+        if callback not in self.channelReadyCallbacks:
+            self.channelReadyCallbacks.append(callback)
 
     def clientConnectionFailed(self, connector, reason):
         self.log.error("Connection failed. Reason: %s", str(reason))
@@ -141,6 +150,14 @@ class AmqpFactory(ClientFactory):
                 self.connectDeferred.callback(self)
         except Exception as e:
             self._on_connection_failed(e)
+            return
+
+        for callback in list(self.channelReadyCallbacks):
+            try:
+                yield defer.maybeDeferred(callback)
+            except Exception as e:
+                # Swallowed so one consumer cannot strand the others on this connection.
+                self.log.error("Channel-ready callback failed; its queue is unattended: %s", e)
 
     def _on_connection_failed(self, error):
         self.log.error("AMQP connection/channel setup failed: %s", error)
