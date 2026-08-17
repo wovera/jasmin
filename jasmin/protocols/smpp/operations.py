@@ -50,6 +50,20 @@ class UnknownMessageStatusError(Exception):
     """
 
 
+def count_pdus(pdu):
+    """How many PDUs a built submit_sm chain will put on the wire, which is the message's segment count.
+
+    Only the split knows it: TS 23.038 6.2.1's two-septet escapes and UTF-16 surrogate pairs are indivisible, so a
+    character carried whole into the next segment can add one that dividing the length never shows.
+    """
+    total = 1
+    while hasattr(pdu, 'nextPdu'):
+        pdu = pdu.nextPdu
+        total += 1
+
+    return total
+
+
 class SMPPOperationFactory:
     lastLongMsgRefNum = 0
 

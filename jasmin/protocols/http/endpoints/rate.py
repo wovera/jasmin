@@ -9,7 +9,8 @@ from twisted.web.server import NOT_DONE_YET
 import messaging.sms.gsm0338
 
 from jasmin.routing.Routables import RoutableSubmitSm
-from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageExceedsMaxPartsError
+from jasmin.protocols.smpp.operations import (SMPPOperationFactory, LongMessageExceedsMaxPartsError,
+                                              count_pdus)
 from jasmin.protocols.http.errors import UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
 from jasmin.protocols.http.errors import HttpApiError, ServerError, AuthenticationError, InterceptorNotSetError, InterceptorNotConnectedError, InterceptorRunError, RouteNotFoundError
@@ -140,12 +141,8 @@ class Rate(Resource):
             # Get connector from selected route
             self.log.debug("RouterPB selected %s for this SubmitSmPDU", route)
 
-            # Get number of PDUs to be sent (for billing purpose)
-            _pdu = SubmitSmPDU
-            submit_sm_count = 1
-            while hasattr(_pdu, 'nextPdu'):
-                _pdu = _pdu.nextPdu
-                submit_sm_count += 1
+            # Number of PDUs to be sent, which is what the message is billed as.
+            submit_sm_count = count_pdus(SubmitSmPDU)
 
             # Get the bill
             bill = route.getBillFor(user)

@@ -1,6 +1,11 @@
 # Carries the machine-readable failure name alongside the status, which is ambiguous on its own.
 ERROR_CODE_HEADER = 'Jasmin-Error-Code'
 
+# How many segments the accepted message was actually split into, which only the split itself can answer: a
+# character carried whole into the next segment can add one that dividing the length never shows. The caller bills
+# on this, so it is reported rather than left to be re-derived from a copy of the splitting rules.
+SEGMENT_COUNT_HEADER = 'Jasmin-Segment-Count'
+
 
 class HttpApiError(Exception):
     """Base of the HTTP API's errors.
