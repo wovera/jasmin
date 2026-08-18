@@ -13,15 +13,16 @@ from smpp.pdu.pdu_types import RegisteredDeliveryReceipt, RegisteredDelivery
 
 from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.protocols.smpp.configs import SMPPClientConfig
-from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageExceedsMaxPartsError
+from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageExceedsMaxPartsError, count_pdus
 from jasmin.tools.tlv import format_tlvs_for_log
 from jasmin.tools.tlv_encoder import normalize_custom_tlvs
-from jasmin.protocols.http.errors import UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER
+from jasmin.protocols.http.errors import (UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER,
+                                          SEGMENT_COUNT_HEADER)
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
 from jasmin.protocols.http.errors import (HttpApiError, AuthenticationError, ServerError, RouteNotFoundError, ConnectorNotFoundError,
                      ChargingError, ThroughputExceededError, InterceptorNotSetError,
                      InterceptorNotConnectedError, InterceptorRunError)
-from jasmin.protocols.http.endpoints import hex2bin, authenticate_user
+from jasmin.protocols.http.endpoints import authenticate_user, encode_short_message
 
 
 def update_submit_sm_pdu(routable, config, config_update_params=None):
@@ -84,21 +85,7 @@ class Send(Resource):
     @defer.inlineCallbacks
     def route_routable(self, updated_request):
         try:
-            # Do we have a hex-content ?
-            if b'hex-content' not in updated_request.args:
-                # Convert utf8 to GSM 03.38
-                if updated_request.args[b'coding'][0] == b'0':
-                    if isinstance(updated_request.args[b'content'][0], bytes):
-                        short_message = updated_request.args[b'content'][0].decode().encode('gsm0338', 'replace')
-                    else:
-                        short_message = updated_request.args[b'content'][0].encode('gsm0338', 'replace')
-                    updated_request.args[b'content'][0] = short_message
-                else:
-                    # Otherwise forward it as is
-                    short_message = updated_request.args[b'content'][0]
-            else:
-                # Otherwise convert hex to bin
-                short_message = hex2bin(updated_request.args[b'hex-content'][0])
+            short_message = encode_short_message(updated_request)
 
             # Authentication
             user = authenticate_user(
@@ -402,6 +389,8 @@ class Send(Resource):
             updated_request.setResponseCode(response['status'])
             if 'token' in response:
                 updated_request.setHeader(ERROR_CODE_HEADER, response['token'])
+            if response['status'] == 200 and routedConnector is not None:
+                updated_request.setHeader(SEGMENT_COUNT_HEADER, str(count_pdus(routable.pdu)))
 
             # Default return
             _return = 'Error "%s"' % response['return']

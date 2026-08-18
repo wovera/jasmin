@@ -1,6 +1,7 @@
 from twisted.trial.unittest import TestCase
 
-from jasmin.protocols.smpp.operations import LongMessageExceedsMaxPartsError, SMPPOperationFactory
+from jasmin.protocols.smpp.operations import (LongMessageExceedsMaxPartsError, SMPPOperationFactory,
+                                              count_pdus)
 
 
 class LongContentCapTestCase(TestCase):
@@ -15,13 +16,6 @@ class LongContentCapTestCase(TestCase):
     def _factory(self):
         return SMPPOperationFactory(long_content_max_parts=self.MAX_PARTS)
 
-    def _segmentCount(self, pdu):
-        count = 1
-        while hasattr(pdu, 'nextPdu'):
-            pdu = pdu.nextPdu
-            count += 1
-        return count
-
     def _submit(self, characterCount):
         return self._factory().SubmitSM(
             source_addr='1423',
@@ -32,7 +26,7 @@ class LongContentCapTestCase(TestCase):
     def test_a_message_filling_the_cap_exactly_is_built_whole(self):
         pdu = self._submit(self.SEGMENT_LENGTH * self.MAX_PARTS)
 
-        self.assertEqual(self._segmentCount(pdu), self.MAX_PARTS)
+        self.assertEqual(count_pdus(pdu), self.MAX_PARTS)
 
     def test_one_character_past_the_cap_is_refused_rather_than_truncated(self):
         # One septet more than the cap can carry: the old behaviour built MAX_PARTS segments and dropped the
@@ -56,4 +50,4 @@ class LongContentCapTestCase(TestCase):
     def test_a_short_message_is_untouched_by_the_cap(self):
         pdu = self._submit(10)
 
-        self.assertEqual(self._segmentCount(pdu), 1)
+        self.assertEqual(count_pdus(pdu), 1)
