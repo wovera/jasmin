@@ -692,6 +692,90 @@ class RateSegmentationTestCases(HTTPApiTestCases):
         self.assertEqual(json.loads(response.value())['submit_sm_count'], 1)
 
 
+class SegmentsTestCases(HTTPApiTestCases):
+    """A caller that bills or caps by segment has to know the count before it commits to the send, and only the
+    split knows it. /segments answers from the same builder /send submits, without a route, a bill or a submit."""
+
+    @defer.inlineCallbacks
+    def test_a_short_body_is_one_segment(self):
+        response = yield self.web.get(b"segments", {b'username': 'nathalie',
+                                                    b'password': b'correct',
+                                                    b'content': 'anycontent'})
+
+        self.assertEqual(response.responseCode, 200)
+        self.assertEqual(json.loads(response.value()), {'submit_sm_count': 1, 'data_coding': 0})
+
+    @defer.inlineCallbacks
+    def test_an_absent_body_is_one_segment(self):
+        response = yield self.web.get(b"segments", {b'username': 'nathalie',
+                                                    b'password': b'correct'})
+
+        self.assertEqual(response.responseCode, 200)
+        self.assertEqual(json.loads(response.value())['submit_sm_count'], 1)
+
+    @defer.inlineCallbacks
+    def test_segments_are_counted_over_gsm_not_raw_utf8(self):
+        # 160 septets in GSM 03.38, but 320 bytes as UTF-8, which would be counted as more than one segment.
+        response = yield self.web.post(b"segments", {b'username': 'nathalie',
+                                                     b'password': b'correct',
+                                                     b'coding': b'0',
+                                                     b'content': 'é' * 160})
+
+        self.assertEqual(response.responseCode, 200)
+        self.assertEqual(json.loads(response.value())['submit_sm_count'], 1)
+
+    @defer.inlineCallbacks
+    def test_ucs2_is_counted_over_the_hex_content_code_units(self):
+        response = yield self.web.post(b"segments", {b'username': 'nathalie',
+                                                     b'password': b'correct',
+                                                     b'coding': b'8',
+                                                     b'hex-content': ('0100' * 71).encode()})
+
+        self.assertEqual(response.responseCode, 200)
+        self.assertEqual(json.loads(response.value()), {'submit_sm_count': 2, 'data_coding': 8})
+
+    @defer.inlineCallbacks
+    def test_it_answers_for_a_body_longer_than_a_connector_would_submit(self):
+        response = yield self.web.post(b"segments", {b'username': 'nathalie',
+                                                     b'password': b'correct',
+                                                     b'content': 'A' * (153 * 6)})
+
+        self.assertEqual(response.responseCode, 200)
+        self.assertEqual(json.loads(response.value())['submit_sm_count'], 6)
+
+    @defer.inlineCallbacks
+    def test_it_reports_what_rate_prices(self):
+        counted = yield self.web.post(b"segments", {b'username': 'nathalie',
+                                                    b'password': b'correct',
+                                                    b'content': 'A' * 307})
+        priced = yield self.web.get(b"rate", {b'username': 'nathalie',
+                                              b'password': b'correct',
+                                              b'to': b'06155423',
+                                              b'content': 'A' * 307})
+
+        self.assertEqual(json.loads(counted.value())['submit_sm_count'],
+                         json.loads(priced.value())['submit_sm_count'])
+
+    @defer.inlineCallbacks
+    def test_authentication_failure_names_itself(self):
+        response = yield self.web.get(b"segments", {b'username': 'nathalie',
+                                                    b'password': b'wrong',
+                                                    b'content': 'anycontent'})
+
+        self.assertEqual(response.responseCode, 403)
+        self.assertEqual(response.responseHeaders.getRawHeaders(b'jasmin-error-code')[0],
+                         b'authentication_failed')
+
+    @defer.inlineCallbacks
+    def test_content_and_hex_content_are_mutually_exclusive(self):
+        response = yield self.web.post(b"segments", {b'username': 'nathalie',
+                                                     b'password': b'correct',
+                                                     b'content': 'anycontent',
+                                                     b'hex-content': b'0041'})
+
+        self.assertEqual(response.responseCode, 400)
+
+
 class ErrorCodeHeaderTestCases(HTTPApiTestCases):
     """The status alone is ambiguous - 403 covers authentication, charging and throughput - so every error
     answer carries the machine-readable name too, on every endpoint and every path."""

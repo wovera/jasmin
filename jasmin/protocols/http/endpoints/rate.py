@@ -6,7 +6,6 @@ import pickle
 from twisted.internet import reactor, defer
 from twisted.web.resource import Resource
 from twisted.web.server import NOT_DONE_YET
-import messaging.sms.gsm0338
 
 from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.protocols.smpp.operations import (SMPPOperationFactory, LongMessageExceedsMaxPartsError,
@@ -14,7 +13,7 @@ from jasmin.protocols.smpp.operations import (SMPPOperationFactory, LongMessageE
 from jasmin.protocols.http.errors import UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
 from jasmin.protocols.http.errors import HttpApiError, ServerError, AuthenticationError, InterceptorNotSetError, InterceptorNotConnectedError, InterceptorRunError, RouteNotFoundError
-from jasmin.protocols.http.endpoints import hex2bin, authenticate_user
+from jasmin.protocols.http.endpoints import authenticate_user, encode_short_message
 
 
 class Rate(Resource):
@@ -35,21 +34,7 @@ class Rate(Resource):
     @defer.inlineCallbacks
     def route_routable(self, request):
         try:
-            # Do we have a hex-content ?
-            if b'hex-content' not in request.args:
-                # Convert utf8 to GSM 03.38
-                if request.args[b'coding'][0] == b'0':
-                    if isinstance(request.args[b'content'][0], bytes):
-                        short_message = request.args[b'content'][0].decode().encode('gsm0338', 'replace')
-                    else:
-                        short_message = request.args[b'content'][0].encode('gsm0338', 'replace')
-                    request.args[b'content'][0] = short_message
-                else:
-                    # Otherwise forward it as is
-                    short_message = request.args[b'content'][0]
-            else:
-                # Otherwise convert hex to bin
-                short_message = hex2bin(request.args[b'hex-content'][0])
+            short_message = encode_short_message(request)
 
             # Authentication
             user = authenticate_user(

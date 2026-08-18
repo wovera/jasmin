@@ -9,6 +9,7 @@ from twisted.web.resource import Resource
 import jasmin
 from jasmin.protocols.http.endpoints.send import Send
 from jasmin.protocols.http.endpoints.rate import Rate
+from jasmin.protocols.http.endpoints.segments import Segments
 from jasmin.protocols.http.endpoints.ping import Ping
 from jasmin.protocols.http.endpoints.balance import Balance
 from jasmin.protocols.http.endpoints.metrics import Metrics
@@ -48,6 +49,8 @@ class HTTPApi(Resource):
         self.putChild(b'send', Send(config, RouterPB, SMPPClientManagerPB, stats, log, interceptor))
         log.debug("Setting http url routing for /rate")
         self.putChild(b'rate', Rate(config, RouterPB, stats, log, interceptor))
+        log.debug("Setting http url routing for /segments")
+        self.putChild(b'segments', Segments(config, RouterPB, stats, log))
         log.debug("Setting http url routing for /balance")
         self.putChild(b'balance', Balance(RouterPB, stats, log))
         log.debug("Setting http url routing for /ping")
