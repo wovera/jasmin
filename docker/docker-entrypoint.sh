@@ -42,5 +42,9 @@ if [ "$2" = "--enable-interceptor-client" ]; then
   interceptord.py &
 fi
 
+# jasmind restores its persisted profile at startup only when given jCli credentials, so a deployment that
+# replaced the factory pair comes back from a restart with no connectors and a console that still answers.
+set -- "$@" -u "${JCLI_ADMIN_USERNAME:-jcliadmin}" -p "${JCLI_ADMIN_PASSWORD_PLAIN:-jclipwd}"
+
 echo 'Starting jasmind'
 exec "$@"

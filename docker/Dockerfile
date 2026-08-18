@@ -63,7 +63,9 @@ VOLUME ["/var/log/jasmin", "/etc/jasmin", "/etc/jasmin/store"]
 
 COPY docker/docker-entrypoint.sh /
 ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["jasmind.py", "--enable-interceptor-client", "--enable-dlr-thrower", "--enable-dlr-lookup", "-u", "jcliadmin", "-p", "jclipwd"]
+# The jCli credentials are appended by the entrypoint from the environment, so an image whose admin pair was
+# changed still restores its persisted profile on startup rather than failing that login in silence.
+CMD ["jasmind.py", "--enable-interceptor-client", "--enable-dlr-thrower", "--enable-dlr-lookup"]
 # Notes:
 # - jasmind is started with native dlr-thrower and dlr-lookup threads instead of standalone processes
 # - restapi (0.9rc16+) is not started in this docker configuration
