@@ -39,6 +39,8 @@ class HTTPApiTestCases(TestCase):
         SMPPClientPBConfigInstance = SMPPClientPBConfig()
         SMPPClientPBConfigInstance.authentication = False
         self.clientManager_f = SMPPClientManagerPB(SMPPClientPBConfigInstance)
+        self.clientManager_f.redisClient = Mock()
+        self.clientManager_f.redisClient.set = Mock(return_value=defer.succeed(True))
 
         httpApiConfigInstance = HTTPApiConfig()
         self.web = DummySite(HTTPApi(self.RouterPB_f, self.clientManager_f, httpApiConfigInstance))
@@ -62,7 +64,7 @@ class AuthenticationTestCases(HTTPApiTestCases):
                                                b'password': b'correct',
                                                b'to': b'06155423',
                                                b'content': 'anycontent'})
-        self.assertEqual(response.responseCode, 500)
+        self.assertEqual(response.responseCode, 503)
         self.assertNotEqual(response.value(), "Error \"Authentication failure for username:%s\"" % self.u1.username)
 
     @defer.inlineCallbacks
@@ -174,10 +176,10 @@ class SendTestCases(HTTPApiTestCases):
                                                           'custom_tlvs': [
                                                               (0x3000, None, 'COctetString', 'test1234')
                                                           ]}, headers={b'Content-type': [b'application/json']})
-        self.assertEqual(response.responseCode, 500)
+        self.assertEqual(response.responseCode, 503)
         # This is a normal error since SMPPClientManagerPB is not really running
         self.assertEqual(response.value(),
-                         b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                         b"Error \"Submit not confirmed by the broker\"")
 
     @defer.inlineCallbacks
     def test_send_with_correct_args(self):
@@ -203,10 +205,10 @@ class SendTestCases(HTTPApiTestCases):
                                                b'password': b'correct',
                                                b'to': b'06155423',
                                                b'content': 'anycontent'})
-        self.assertEqual(response.responseCode, 500)
+        self.assertEqual(response.responseCode, 503)
         # This is a normal error since SMPPClientManagerPB is not really running
         self.assertEqual(response.value(),
-                         b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                         b"Error \"Submit not confirmed by the broker\"")
 
     @defer.inlineCallbacks
     def test_send_with_priority(self):
@@ -220,11 +222,11 @@ class SendTestCases(HTTPApiTestCases):
 
         for params['priority'] in valid_priorities:
             response = yield self.web.post(b'send', params)
-            self.assertEqual(response.responseCode, 500)
+            self.assertEqual(response.responseCode, 503)
 
             # This is a normal error since SMPPClientManagerPB is not really running
             self.assertEqual(response.value(),
-                             b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                             b"Error \"Submit not confirmed by the broker\"")
 
         # Priority definitions
         invalid_priorities = {-1, 'a', 44, 4}
@@ -250,10 +252,10 @@ class SendTestCases(HTTPApiTestCases):
         for params[b'validity-period'] in valid_vps:
             response = yield self.web.post(b'send', params)
 
-            self.assertEqual(response.responseCode, 500)
+            self.assertEqual(response.responseCode, 503)
             # This is a normal error since SMPPClientManagerPB is not really running
             self.assertEqual(response.value(),
-                             b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                             b"Error \"Submit not confirmed by the broker\"")
 
         # Validity period definitions
         invalid_vps = {-1, 'a', 1.0}
@@ -429,9 +431,9 @@ class SendTestCases(HTTPApiTestCases):
         for params['dlr-url'] in valid_urls:
             response = yield self.web.post(b'send', params)
 
-            self.assertEqual(response.responseCode, 500)
+            self.assertEqual(response.responseCode, 503)
             self.assertEqual(response.value(),
-                             b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                             b"Error \"Submit not confirmed by the broker\"")
 
         # URL definitions
         invalid_urls = {'ftp://127.0.0.1/receipt',
@@ -472,9 +474,9 @@ class SendTestCases(HTTPApiTestCases):
         for params['tags'] in valid_tags:
             response = yield self.web.post(b'send', params)
 
-            self.assertEqual(response.responseCode, 500)
+            self.assertEqual(response.responseCode, 503)
             self.assertEqual(response.value(),
-                             b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                             b"Error \"Submit not confirmed by the broker\"")
 
         invalid_tags = {';', '#,.,:', '+++,sh1t,3r='}
         for params['tags'] in invalid_tags:
@@ -509,9 +511,9 @@ class SendTestCases(HTTPApiTestCases):
         params['hex-content'] = b''
         response = yield self.web.post(b'send', params)
 
-        self.assertEqual(response.responseCode, 500)
+        self.assertEqual(response.responseCode, 503)
         self.assertEqual(response.value(),
-                         b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                         b"Error \"Submit not confirmed by the broker\"")
 
         # Assert incorrect encoding
         params['hex-content'] = 'Clear text'
@@ -531,19 +533,19 @@ class SendTestCases(HTTPApiTestCases):
 
         # Assert sdt optional
         response = yield self.web.post(b'send', params)
-        self.assertEqual(response.responseCode, 500)
+        self.assertEqual(response.responseCode, 503)
         # This is a normal error since SMPPClientManagerPB is not really running
         self.assertEqual(response.value(),
-                         b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                         b"Error \"Submit not confirmed by the broker\"")
 
         # Assert valid sdt
         valid_sdt = {'000000000100000R'}
         for params['sdt'] in valid_sdt:
             response = yield self.web.post(b'send', params)
 
-            self.assertEqual(response.responseCode, 500)
+            self.assertEqual(response.responseCode, 503)
             self.assertEqual(response.value(),
-                             b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                             b"Error \"Submit not confirmed by the broker\"")
 
         # Assert invalid sdt
         invalid_sdt = {'', '000000000100000', '00', '00+', '00R', '00-', '0000000001000000R', '00000000100000R'}
@@ -892,7 +894,7 @@ class UserStatsTestCases(HTTPApiTestCases):
                                                b'password': b'correct',
                                                b'to': b'06155423',
                                                b'content': 'anycontent'})
-        self.assertEqual(response.responseCode, 500)
+        self.assertEqual(response.responseCode, 503)
         self.assertEqual(_submit_sm_request_count + 1,
                          self.RouterPB_f.getUser(1).getCnxStatus().httpapi['submit_sm_request_count'])
 
@@ -996,10 +998,10 @@ class StatsTestCases(HTTPApiTestCases):
                                                b'to': b'06155423',
                                                b'content': 'anycontent'})
 
-        self.assertEqual(response.responseCode, 500)
+        self.assertEqual(response.responseCode, 503)
         # This is a normal error since SMPPClientManagerPB is not really running
         self.assertEqual(response.value(),
-                         b"Error \"Cannot send submit_sm, check SMPPClientManagerPB log file for details\"")
+                         b"Error \"Submit not confirmed by the broker\"")
 
         self.assertTrue(type(stats.get('created_at')) == datetime)
         self.assertEqual(stats.get('request_count'), 1)

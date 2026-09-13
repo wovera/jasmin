@@ -19,7 +19,8 @@ from jasmin.tools.tlv_encoder import normalize_custom_tlvs
 from jasmin.protocols.http.errors import (UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER,
                                           SEGMENT_COUNT_HEADER)
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
-from jasmin.protocols.http.errors import (HttpApiError, AuthenticationError, ServerError, RouteNotFoundError, ConnectorNotFoundError,
+from jasmin.protocols.http.errors import (HttpApiError, AuthenticationError, ServerError, SubmitNotConfirmedError,
+                     RouteNotFoundError, ConnectorNotFoundError,
                      ChargingError, ThroughputExceededError, InterceptorNotSetError,
                      InterceptorNotConnectedError, InterceptorRunError)
 from jasmin.protocols.http.endpoints import authenticate_user, encode_short_message
@@ -63,6 +64,9 @@ def update_submit_sm_pdu(routable, config, config_update_params=None):
                     _pdu.params[param] = config[param]
 
     return routable
+
+
+LANE_PRECEDENCE = {b'transactional': 3, b'bulk': 0}
 
 
 class Send(Resource):
@@ -243,7 +247,8 @@ class Send(Resource):
                 # submits to a connector that cannot deliver them, and they age out silently.
                 routedConnector = route.getBoundConnector(
                     lambda cid: (self.SMPPClientManagerPB.perspective_connector_details(cid) or {}).get(
-                        'session_state', '')[:6] == 'BOUND_')
+                        'session_state', '')[:6] == 'BOUND_',
+                    lambda cid: self.SMPPClientManagerPB.perspective_connector_ready_count(cid))
 
             if routedConnector is None:
                 self.stats.inc('route_error_count')
@@ -259,12 +264,14 @@ class Send(Resource):
             # Set a placeholder for any parameter update to be applied on the pdu(s)
             param_updates = {}
 
-            # Set priority
-            priority = 0
+            lane = updated_request.args.get(b'lane', [b'transactional'])[0]
+            priority = LANE_PRECEDENCE[lane]
+            priority_flag = None
             if b'priority' in updated_request.args:
-                priority = int(updated_request.args[b'priority'][0])
-                param_updates['priority_flag'] = priority_flag_value_map[priority]
-            self.log.debug("SubmitSmPDU priority is set to %s", priority)
+                wanted = int(updated_request.args[b'priority'][0])
+                allowed = min(wanted, getattr(connector_config, 'priority_flag_max', 0))
+                priority_flag = priority_flag_value_map[allowed]
+                param_updates['priority_flag'] = priority_flag
 
             # Set schedule_delivery_time
             if b'sdt' in updated_request.args:
@@ -365,12 +372,16 @@ class Send(Resource):
                 dlr_level=dlr_level,
                 dlr_method=dlr_method,
                 dlr_connector=routedConnector.cid,
-                msgid=client_msgid)
+                msgid=client_msgid,
+                tags={k[4:].decode(): v[0].decode()
+                      for k, v in updated_request.args.items() if k in (b'tag_batch', b'tag_account')})
 
             # a falsy or Failure result must never render as Success 200
             if not c or isinstance(c, Failure):
                 self.stats.inc('server_error_count')
                 self.log.error('Failed to send SubmitSmPDU to [cid:%s]: %s', routedConnector.cid, c)
+                if not c:
+                    raise SubmitNotConfirmedError()
                 raise ServerError('Cannot send submit_sm, check SMPPClientManagerPB log file for details')
             else:
                 self.stats.inc('success_count')
@@ -407,11 +418,13 @@ class Send(Resource):
                     logged_content = '%r' % re.sub(rb'[^\x20-\x7E]+', b'.', short_message)
 
                 self.log.info(
-                    'SMS-MT [uid:%s] [cid:%s] [msgid:%s] [prio:%s] [dlr:%s] [from:%s] [to:%s] [content:%s] [tlvs:%s]',
+                    'SMS-MT [uid:%s] [cid:%s] [msgid:%s] [prio:%s] [flag:%s] [dlr:%s] [from:%s] [to:%s] '
+                    '[content:%s] [tlvs:%s]',
                     user.uid,
                     routedConnector.cid,
                     response['return'],
                     priority,
+                    priority_flag,
                     dlr_level_text,
                     routable.pdu.params['source_addr'],
                     updated_request.args[b'to'][0],
@@ -451,6 +464,9 @@ class Send(Resource):
                       # Priority validation pattern can be validated/filtered further more
                       # through HttpAPICredentialValidator
                       b'priority': {'optional': True, 'pattern': re.compile(rb'^[0-3]$')},
+                      b'lane': {'optional': True, 'pattern': re.compile(rb'^(transactional|bulk)$')},
+                      b'tag_batch': {'optional': True, 'pattern': re.compile(rb'^[A-Za-z0-9_.:-]{1,64}$')},
+                      b'tag_account': {'optional': True, 'pattern': re.compile(rb'^[A-Za-z0-9_.:-]{1,64}$')},
                       b'sdt': {'optional': True,
                               'pattern': re.compile(rb'^\d{2}\d{2}\d{2}\d{2}\d{2}\d{2}\d{1}\d{2}(\+|-|R)$')},
                       # Validity period validation pattern can be validated/filtered further more

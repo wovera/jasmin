@@ -98,14 +98,14 @@ class IdempotentSubmitTestCases(SMPPClientPBProxyTestCase):
         cid = self.defaultConfig.id
         msgid = '44444444-4444-4444-4444-444444444444'
 
-        publish = self.clientManagerPB.amqpBroker.publish
-        self.clientManagerPB.amqpBroker.publish = lambda *a, **k: defer.fail(IOError('broker unavailable'))
+        basic_publish = self.clientManagerPB.submit_chan.basic_publish
+        self.clientManagerPB.submit_chan.basic_publish = lambda *a, **k: defer.fail(IOError('broker unavailable'))
         try:
             yield self.submit_sm(cid, self.SubmitSmPDU, self.uid, msgid=msgid)
         except Exception:
             pass
         finally:
-            self.clientManagerPB.amqpBroker.publish = publish
+            self.clientManagerPB.submit_chan.basic_publish = basic_publish
         # The PB server logs the failure before returning it, and trial fails a test that leaves one logged.
         self.flushLoggedErrors(IOError)
         yield waitFor(1)

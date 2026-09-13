@@ -184,6 +184,10 @@ class SMPPClientConfig:
         if (not isinstance(self.submit_sm_throughput, int)
             and not isinstance(self.submit_sm_throughput, float)):
             raise TypeMismatch('submit_sm_throughput must be an integer or float')
+        self.learned_throughput = kwargs.get('learned_throughput', self.submit_sm_throughput)
+        self.priority_flag_max = kwargs.get('priority_flag_max', 0)
+        if self.priority_flag_max not in [0, 1, 2, 3]:
+            raise UnknownValue('Invalid priority_flag_max: %s' % self.priority_flag_max)
 
         # DLR Message id bases from submit_sm_resp to deliver_sm, possible values:
         # [0] (default) : submit_sm_resp and deliver_sm messages IDs are on the same base.

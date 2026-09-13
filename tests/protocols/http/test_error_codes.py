@@ -12,6 +12,7 @@ from jasmin.protocols.http.errors import (
     LongContentExceededError,
     RouteNotFoundError,
     ServerError,
+    SubmitNotConfirmedError,
     ThroughputExceededError,
     UrlArgsValidationError,
 )
@@ -28,6 +29,7 @@ class ErrorTokenTestCase(TestCase):
         LongContentExceededError: 'long_content_exceeded',
         CredentialValidationError: 'invalid_credentials',
         ServerError: 'server_error',
+        SubmitNotConfirmedError: 'submit_not_confirmed',
         AuthenticationError: 'authentication_failed',
         RouteNotFoundError: 'route_not_found',
         ConnectorNotFoundError: 'connector_not_found',

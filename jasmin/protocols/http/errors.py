@@ -66,6 +66,15 @@ class ServerError(HttpApiError):
         HttpApiError.__init__(self, 500, message)
 
 
+class SubmitNotConfirmedError(HttpApiError):
+    """Raised when the broker does not confirm the submit publish"""
+
+    token = 'submit_not_confirmed'
+
+    def __init__(self, message='Submit not confirmed by the broker'):
+        HttpApiError.__init__(self, 503, message)
+
+
 class AuthenticationError(HttpApiError):
     """Raised on authentication error"""
 

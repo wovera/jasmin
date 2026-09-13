@@ -40,6 +40,8 @@ class SMPPClientManagerPB(pb.Avatar):
         self.connectors = []
         self.declared_queues = []
         self.pickleProtocol = pickle.HIGHEST_PROTOCOL
+        self.status_chan = None
+        self.submit_chan = None
 
         # Persistence flag, accessed through perspective_is_persisted
         self.persisted = True
@@ -77,6 +79,15 @@ class SMPPClientManagerPB(pb.Avatar):
         self.amqpBroker.addChannelReadyCallback(self.reconsumeRunningConnectors)
 
         self.log.info('Added amqpBroker to SMPPClientManagerPB')
+
+        return self.openSubmitChannel()
+
+    @defer.inlineCallbacks
+    def openSubmitChannel(self):
+        # Confirm mode stays off the shared control channel; enabling it there blocks the smpps submit path.
+        self.amqpBroker.addChannelReadyCallback(self.openSubmitChannel)
+        self.submit_chan = yield self.amqpBroker.newChannel()
+        yield self.submit_chan.confirm_delivery()
 
     @defer.inlineCallbacks
     def reconsumeRunningConnectors(self):
@@ -394,7 +405,7 @@ class SMPPClientManagerPB(pb.Avatar):
         submit_sm_queue = 'submit.sm.%s' % cid
         routing_key = 'submit.sm.%s' % cid
         self.log.info('Binding %s queue to %s route_key', submit_sm_queue, routing_key)
-        yield self.amqpBroker.named_queue_declare(queue=submit_sm_queue)
+        yield self.amqpBroker.named_queue_declare(queue=submit_sm_queue, arguments={'x-max-priority': 3})
         yield chan.queue_bind(queue=submit_sm_queue,
                               exchange="messaging",
                               routing_key=routing_key)
@@ -468,6 +479,8 @@ class SMPPClientManagerPB(pb.Avatar):
             submitSmQueueName = 'submit.sm.%s' % cid
             self.log.debug('Deleting queue [%s]', submitSmQueueName)
             yield connector['chan'].queue_delete(queue=submitSmQueueName)
+            if submitSmQueueName in self.amqpBroker.queues:
+                self.amqpBroker.queues.remove(submitSmQueueName)
 
         # Reject & requeue any pending message to avoid loosing messages after
         # clearing timers
@@ -550,6 +563,42 @@ class SMPPClientManagerPB(pb.Avatar):
             # So we just return back the string of it
             return session_state.name
 
+    @defer.inlineCallbacks
+    def perspective_connector_depth(self, cid):
+        """This will return the ready count and head age of a connector's submit queue.
+
+        Reads through a dedicated status channel: a passive declare of a missing queue is a
+        channel-level error, and the connector's own consuming channel must not be poisoned by it.
+        """
+
+        connector = self.getConnector(cid)
+        if connector is None or connector.get('chan') is None:
+            defer.returnValue({'messages_ready': None, 'oldest_ready_age_seconds': None})
+
+        try:
+            if self.status_chan is None:
+                self.status_chan = yield self.amqpBroker.newChannel()
+            declared = yield self.status_chan.queue_declare(queue='submit.sm.%s' % cid, passive=True)
+        except Exception as e:
+            self.log.warning('Could not read queue depth for connector [%s]: %s', cid, e)
+            self.status_chan = None
+            defer.returnValue({'messages_ready': None, 'oldest_ready_age_seconds': None})
+
+        depth = declared.method.message_count
+        connector['sm_listener'].last_ready_count = depth
+        oldest = connector['sm_listener'].oldest_ready_age_seconds() if depth else 0.0
+
+        defer.returnValue({'messages_ready': depth, 'oldest_ready_age_seconds': oldest})
+
+    def perspective_connector_ready_count(self, cid):
+        """Return the connector's last-known ready count without an AMQP round trip, for the send path."""
+
+        connector = self.getConnector(cid)
+        if connector is None:
+            return 0
+
+        return connector['sm_listener'].last_ready_count
+
     def perspective_connector_details(self, cid):
         """This will return the connector details
         """
@@ -579,7 +628,7 @@ class SMPPClientManagerPB(pb.Avatar):
     @defer.inlineCallbacks
     def perspective_submit_sm(self, uid, cid, SubmitSmPDU, submit_sm_bill, priority=1, validity_period=None,
                               pickled=True, dlr_url=None, dlr_level=1, dlr_method='POST', dlr_connector=None,
-                              source_connector='httpapi', msgid=None):
+                              source_connector='httpapi', msgid=None, tags=None):
         """This will enqueue a submit_sm to a connector
         """
         connector = self.getConnector(cid)
@@ -625,6 +674,7 @@ class SMPPClientManagerPB(pb.Avatar):
                 self.log.info('Idempotent submit [msgid:%s] deduplicated; replaying original accept', msgid)
                 defer.returnValue(msgid)
 
+        publish_not_confirmed = False
         try:
             # Publishing a pickled PDU
             self.log.debug('Publishing SubmitSmPDU with routing_key=%s, priority=%s', pubQueueName, priority)
@@ -637,7 +687,8 @@ class SMPPClientManagerPB(pb.Avatar):
                 expiration=validity_period,
                 msgid=msgid,
                 source_connector='httpapi' if source_connector == 'httpapi' else 'smppsapi',
-                destination_cid=cid)
+                destination_cid=cid,
+                tags=tags)
             # Written before the publish, and awaited on both ingresses: the SMSC round trip can complete
             # before a write issued after it lands, and a submit_sm_resp that finds no map is discarded, taking
             # the receipt chain with it.
@@ -694,12 +745,25 @@ class SMPPClientManagerPB(pb.Avatar):
                     yield self.redisClient.hmset(hashKey, hashValues)
                     yield self.redisClient.expire(hashKey, source_connector.factory.config.dlr_expiry)
 
-            yield self.amqpBroker.publish(exchange='messaging', routing_key=pubQueueName, content=c)
-        except Exception:
+            try:
+                if self.submit_chan is None:
+                    raise RuntimeError('submit_chan is not open')
+                yield self.submit_chan.basic_publish(
+                    exchange='messaging', routing_key=pubQueueName,
+                    body=c.pika_body, properties=c.pika_properties, mandatory=True)
+            except Exception:
+                publish_not_confirmed = True
+                raise
+            if connector.get('sm_listener') is not None:
+                connector['sm_listener'].last_ready_count += 1
+        except Exception as e:
             # Release the claim on ANY post-claim failure, not only a failed publish: left held, the caller's
             # retry is answered "already accepted" for a message that never reached the queue.
             if idem_key is not None:
                 yield self.redisClient.delete(idem_key)
+            if publish_not_confirmed:
+                self.log.error('Submit publish [msgid:%s] not confirmed: %s', msgid, e)
+                defer.returnValue(False)
             raise
 
         defer.returnValue(c.properties['message-id'])

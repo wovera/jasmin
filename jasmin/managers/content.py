@@ -85,6 +85,18 @@ class DLR(Content):
         Content.__init__(self, status, properties=properties)
 
 
+class Discard(Content):
+    """Published to dlr.discard when a queued submit is dropped before any SMSC answered it."""
+
+    REASONS = ('expired', 'smppc_not_ready', 'tlv', 'exception', 'revoked')
+
+    def __init__(self, msgid, reason):
+        if reason not in self.REASONS:
+            raise InvalidParameterError('Invalid discard reason: %s' % reason)
+        Content.__init__(self, reason, properties={
+            'message-id': str(msgid), 'headers': {'type': 'discard', 'discard_reason': reason}})
+
+
 class DLRContentForHttpapi(Content):
     """A DLR Content holding information about the origin SubmitSm sent from httpapi and
     receipt acknowledgment details"""
@@ -150,7 +162,7 @@ class SubmitSmContent(PDU):
     """A SMPP SubmitSm Content"""
 
     def __init__(self, uid, body, replyto, submit_sm_bill=None, priority=1, expiration=None, msgid=None,
-                 source_connector='httpapi', destination_cid=None):
+                 source_connector='httpapi', destination_cid=None, tags=None):
         props = {}
 
         # RabbitMQ does not support priority (yet), anyway, we may use any other amqp broker that supports it
@@ -173,6 +185,8 @@ class SubmitSmContent(PDU):
             props['headers']['submit_sm_bill'] = submit_sm_bill
         if expiration is not None:
             props['headers']['expiration'] = expiration
+        if tags:
+            props['headers'].update({'tag_%s' % k: v for k, v in tags.items()})
 
         PDU.__init__(self, body, properties=props)
 

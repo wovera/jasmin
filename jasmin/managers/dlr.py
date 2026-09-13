@@ -218,6 +218,8 @@ class DLRLookup:
             yield self.submit_sm_resp_dlr_callback(message)
         elif message.routing_key == 'dlr.deliver_sm':
             yield self.deliver_sm_dlr_callback(message)
+        elif message.routing_key == 'dlr.discard':
+            yield self.discard_dlr_callback(message)
         else:
             self.log.error('Unknown routing_key in dlr_callback_dispatcher: %s', message.routing_key)
             yield self.rejectMessage(message)
@@ -265,6 +267,19 @@ class DLRLookup:
                 mandatory=True)
         except Exception as e:
             raise ForwardError(str(e))
+
+    @defer.inlineCallbacks
+    def discard_dlr_callback(self, message):
+        msgid = message.content.properties['message-id']
+        reason = message.content.properties['headers']['discard_reason']
+        try:
+            yield self.forward_outcome(msgid, level=1, command_status='DISCARDED', discard_reason=reason)
+            yield self.redisClient.delete("dlr:%s" % msgid)
+        except ForwardError as e:
+            self.log.error('Forward of discard[%s] failed, requeuing: %s', msgid, e)
+            yield self.rejectAndRequeueMessage(message)
+            return
+        yield self.ackMessage(message)
 
     @defer.inlineCallbacks
     def submit_sm_resp_dlr_callback(self, message):

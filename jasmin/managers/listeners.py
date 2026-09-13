@@ -15,7 +15,7 @@ from smpp.twisted.protocol import DataHandlerResponse
 from smpp.pdu.error import SMPPRequestTimoutError
 
 from jasmin.managers.configs import SMPPClientPBConfig
-from jasmin.managers.content import SubmitSmRespContent, DeliverSmContent, SubmitSmRespBillContent, DLR
+from jasmin.managers.content import SubmitSmRespContent, DeliverSmContent, SubmitSmRespBillContent, DLR, Discard
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.tools.jitter import jittered
 from jasmin.protocols.smpp.error import *
@@ -63,6 +63,13 @@ class SMPPClientSMListener:
         self.rejectTimers = {}
         self.submit_retrials = {}
         self.qosTimer = None
+        self.last_dequeued_created_at = None
+        self.last_ready_count = 0
+        self.learned_rate = (
+            qos.LearnedRate(self.SMPPClientFactory.config.submit_sm_throughput)
+            if self.SMPPClientFactory.config.submit_sm_throughput > 0
+            else None
+        )
 
         # Set pickleProtocol
         self.pickleProtocol = SMPPClientPBConfig(self.config.config_file).pickle_protocol
@@ -161,9 +168,28 @@ class SMPPClientSMListener:
         except Exception as e:
             self.log.warning("Could not ack SubmitSmPDU[%s] (delivering channel likely closed): %s", msgid, e)
 
+    @defer.inlineCallbacks
+    def _discard(self, message, reason):
+        msgid = message.content.properties['message-id']
+        if self.config.emit_discard_dlr:
+            try:
+                yield self.amqpBroker.publish(exchange='messaging', routing_key='dlr.discard',
+                                              content=Discard(msgid, reason))
+            except Exception as e:
+                self.log.error("Discard receipt for SubmitSmPDU[%s] not published (%s), message requeued: %s",
+                               msgid, reason, e)
+                yield self.rejectAndRequeueMessage(message, delay=True)
+                return
+        yield self.rejectMessage(message)
+
     def _on_message(self, received):
         # Wrap pika's ReceivedMessage in the txamqp-style shim submit_sm_callback below expects.
         return self.submit_sm_callback(DeliveryMessage(received))
+
+    def oldest_ready_age_seconds(self):
+        if self.last_dequeued_created_at is None:
+            return None
+        return max(0.0, (datetime.now() - self.last_dequeued_created_at).total_seconds())
 
     @defer.inlineCallbacks
     def submit_sm_callback(self, message):
@@ -176,6 +202,11 @@ class SMPPClientSMListener:
             msgid = message.content.properties['message-id']
             SubmitSmPDU = pickle.loads(message.content.body)
 
+            if 'created_at' in message.content.properties.get('headers', {}):
+                self.last_dequeued_created_at = parser.parse(
+                    message.content.properties['headers']['created_at'])
+            self.last_ready_count = max(0, self.last_ready_count - 1)
+
             self.submit_sm_q.get().addCallback(self._on_message).addErrback(self.submit_sm_errback)
 
             self.log.debug("Callbacked a submit_sm with a SubmitSmPDU[%s] (?): %s", msgid, SubmitSmPDU)
@@ -186,27 +217,12 @@ class SMPPClientSMListener:
             else:
                 self.submit_retrials[msgid] = 1
 
-            if self.qos_last_submit_sm_at is None:
-                self.qos_last_submit_sm_at = datetime(1970, 1, 1)
-
-            if self.SMPPClientFactory.config.submit_sm_throughput > 0:
-                qos_slow_down = qos.throttle_delay(
-                    self.SMPPClientFactory.config.submit_sm_throughput,
-                    self.qos_last_submit_sm_at,
-                    datetime.now())
-                if qos_slow_down > 0:
-                    self.log.debug(
-                        "QoS: submit_sm_callback faster than throughput (%s/s), slowing down %ss.",
-                        self.SMPPClientFactory.config.submit_sm_throughput, qos_slow_down)
-                    yield qos.slow_down(qos_slow_down)
-                self.qos_last_submit_sm_at = datetime.now()
-
             # Verify if message is a SubmitSm PDU
             if isinstance(SubmitSmPDU, SubmitSM) is False:
                 self.log.error(
                     "Received object[%s] is not an instance of SubmitSm: discarding this unknown object from queue",
                     msgid)
-                yield self.rejectMessage(message)
+                yield self._discard(message, 'tlv')
                 defer.returnValue(False)
 
             # If the message has expired in the queue
@@ -215,7 +231,7 @@ class SMPPClientSMListener:
                 if expiration_datetime < datetime.now():
                     self.log.info(
                         "Discarding expired message[%s]: expiration is %s", msgid, expiration_datetime)
-                    yield self.rejectMessage(message)
+                    yield self._discard(message, 'expired')
                     defer.returnValue(False)
 
             # SMPP Client should be already connected
@@ -227,7 +243,7 @@ class SMPPClientSMListener:
                         "SMPPC [cid:%s] is not connected: Discarding (#%s) SubmitSmPDU[%s], over-aged %s seconds.",
                         self.SMPPClientFactory.config.id, self.submit_retrials[msgid],
                         msgid, msgAge.total_seconds())
-                    yield self.rejectMessage(message)
+                    yield self._discard(message, 'smppc_not_ready')
                     defer.returnValue(False)
                 else:
                     if self.config.submit_retrial_delay_smppc_not_ready:
@@ -251,7 +267,7 @@ class SMPPClientSMListener:
                         "SMPPC [cid:%s] is not bound: Discarding (#%s) SubmitSmPDU[%s], over-aged %s seconds.",
                         self.SMPPClientFactory.config.id, self.submit_retrials[msgid],
                         msgid, msgAge.total_seconds())
-                    yield self.rejectMessage(message)
+                    yield self._discard(message, 'smppc_not_ready')
                     defer.returnValue(False)
                 else:
                     if self.config.submit_retrial_delay_smppc_not_ready:
@@ -296,8 +312,48 @@ class SMPPClientSMListener:
             ok, err = validate_custom_tlvs(SubmitSmPDU.custom_tlvs, connector_tlvs)
             if not ok:
                 self.log.error("Rejecting SubmitSmPDU[%s]: %s", msgid, err)
-                yield self.rejectMessage(message)
+                yield self._discard(message, 'tlv')
                 defer.returnValue(False)
+
+            headers = message.content.properties.get('headers', {})
+            for scope in ('batch', 'account'):
+                tag = headers.get('tag_%s' % scope)
+                if tag and self.redisClient is not None:
+                    try:
+                        revoked = yield self.redisClient.exists('revoked:%s:%s' % (scope, tag))
+                    except Exception as e:
+                        self.log.warning(
+                            "Revoke check failed for [scope:%s] [tag:%s]: %s, sending as not revoked",
+                            scope, tag, e)
+                        revoked = False
+                    if revoked:
+                        yield self._discard(message, 'revoked')
+                        defer.returnValue(False)
+
+            if self.qos_last_submit_sm_at is None:
+                self.qos_last_submit_sm_at = datetime(1970, 1, 1)
+
+            if self.SMPPClientFactory.config.submit_sm_throughput > 0:
+                throughput = self.SMPPClientFactory.config.submit_sm_throughput
+                if self.learned_rate is None or self.learned_rate.ceiling != float(throughput):
+                    self.learned_rate = qos.LearnedRate(throughput)
+                    self.SMPPClientFactory.config.learned_throughput = self.learned_rate.current
+                parts = 1
+                pdu = SubmitSmPDU
+                while hasattr(pdu, 'nextPdu'):
+                    parts += 1
+                    pdu = pdu.nextPdu
+                qos_slow_down = qos.throttle_delay(
+                    self.learned_rate.current,
+                    self.qos_last_submit_sm_at,
+                    datetime.now(),
+                    count=parts)
+                if qos_slow_down > 0:
+                    self.log.debug(
+                        "QoS: submit_sm_callback faster than throughput (%s/s), slowing down %ss.",
+                        self.learned_rate.current, qos_slow_down)
+                    yield qos.slow_down(qos_slow_down)
+                self.qos_last_submit_sm_at = datetime.now()
 
             # Finally: send the sms !
             self.log.debug("Sending SubmitSmPDU[%s] through SMPPClientFactory [cid:%s] after %s requeues.",
@@ -318,7 +374,7 @@ class SMPPClientSMListener:
         except Exception as e:
             self.log.critical("Rejecting SubmitSmPDU[%s] through [cid:%s] for an unknown error (%s): %s",
                               msgid, self.SMPPClientFactory.config.id, type(e), e)
-            self.rejectMessage(message)
+            yield self._discard(message, 'exception')
             defer.returnValue(False)
 
     @defer.inlineCallbacks
@@ -338,6 +394,10 @@ class SMPPClientSMListener:
             if r.response.status == CommandStatus.ESME_ROK:
                 # No more retrials !
                 del self.submit_retrials[msgid]
+
+                if self.learned_rate:
+                    self.learned_rate.clean(datetime.now())
+                    self.SMPPClientFactory.config.learned_throughput = self.learned_rate.current
 
                 # Get bill information
                 if submit_sm_resp_bill is not None and submit_sm_resp_bill.getTotalAmounts() > 0:
@@ -406,7 +466,17 @@ class SMPPClientSMListener:
                     format_tlvs_for_log(_pdu, self.config.log_privacy))
             else:
                 # Message must be retried ?
-                if r.response.status.name in self.config.submit_error_retrial:
+                if r.response.status == CommandStatus.ESME_RTHROTTLED and self.learned_rate:
+                    self.learned_rate.throttled()
+                    self.SMPPClientFactory.config.learned_throughput = self.learned_rate.current
+
+                    if self.submit_retrials[msgid] < self.config.submit_error_retrial.get(
+                            r.response.status.name, {'count': 0})['count']:
+                        yield self.rejectAndRequeueMessage(amqpMessage, delay=False)
+                        will_be_retried = True
+                    else:
+                        del self.submit_retrials[msgid]
+                elif r.response.status.name in self.config.submit_error_retrial:
                     retrial = self.config.submit_error_retrial[r.response.status.name]
 
                     # Still have some retries to go ?

@@ -56,8 +56,8 @@ class HttpapiTestCases(MetricsTestCases):
                                                  b'to': b'06155423',
                                                  b'content': 'anycontent'})
         self.assertEqual(response.value(),
-                         b'Error "Cannot send submit_sm, check SMPPClientManagerPB log file for details"')
-        self.assertEqual(response.responseCode, 500)
+                         b'Error "Submit not confirmed by the broker"')
+        self.assertEqual(response.responseCode, 503)
 
         _after = yield self.get_metric()
         self.assertEqual(int(_before['httpapi_request_count'].encode()) + 1,

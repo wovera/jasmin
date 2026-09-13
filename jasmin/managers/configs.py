@@ -61,6 +61,8 @@ class SMPPClientSMListenerConfig(ConfigFile):
         self.submit_max_age_smppc_not_ready = self._getint(
             'sm-listener', 'submit_max_age_smppc_not_ready', 1200)
 
+        self.emit_discard_dlr = self._getbool('sm-listener', 'emit_discard_dlr', True)
+
         self.submit_retrial_delay_smppc_not_ready = self._getint(
             'sm-listener', 'submit_retrial_delay_smppc_not_ready', 30)
 

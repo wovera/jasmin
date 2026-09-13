@@ -181,18 +181,19 @@ class AmqpFactory(ClientFactory):
 
         return None
 
-    def named_queue_declare(self, *args, **keys):
+    def named_queue_declare(self, queue, arguments=None, **keys):
         """Wrapper around the control channel's queue_declare that dedups redeclaration via self.queues."""
         if not self.connected:
             self.log.error("AMQP Client is not connected, cannot queue_declare")
             return None
 
         for q in self.queues:
-            if q == keys.get('queue'):
+            if q == queue:
                 self.log.debug('Queue [%s] is already declared, no need to redeclare it', q)
                 return None
 
-        return self.chan.queue_declare(*args, **keys).addCallback(self._queue_declared)
+        return self.chan.queue_declare(
+            queue=queue, arguments=arguments, **keys).addCallback(self._queue_declared)
 
     def _queue_declared(self, frame):
         # pika's queue_declare result carries the queue name on the method frame.

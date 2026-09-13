@@ -423,7 +423,8 @@ class SMPPServerFactory(_SMPPServerFactory):
                 # submits to a connector that cannot deliver them, and they age out silently.
                 routedConnector = route.getBoundConnector(
                     lambda cid: (self.SMPPClientManagerPB.perspective_connector_details(cid) or {}).get(
-                        'session_state', '')[:6] == 'BOUND_')
+                        'session_state', '')[:6] == 'BOUND_',
+                    lambda cid: self.SMPPClientManagerPB.perspective_connector_ready_count(cid))
 
             if routedConnector is None:
                 self.log.error("Route has no bound connector to handle SubmitSmPDU: %s",

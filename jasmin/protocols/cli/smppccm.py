@@ -26,7 +26,8 @@ SMPPClientConfigKeyMap = {
     'def_msg_id': 'sm_default_msg_id', 'coding': 'data_coding', 'requeue_delay': 'requeue_delay',
     'submit_throughput': 'submit_sm_throughput', 'dlr_expiry': 'dlr_expiry', 'dlr_msgid': 'dlr_msg_id_bases',
     'con_fail_retry': 'reconnectOnConnectionFailure', 'dst_npi': 'dest_addr_npi',
-    'trx_to': 'inactivityTimerSecs', 'ssl': 'useSSL', 'custom_tlvs': 'custom_tlvs'}
+    'trx_to': 'inactivityTimerSecs', 'ssl': 'useSSL', 'custom_tlvs': 'custom_tlvs',
+    'prio_max': 'priority_flag_max'}
 
 # Keys to be kept in string type, as requested in #64 and #105
 SMPPClientConfigStringKeys = [

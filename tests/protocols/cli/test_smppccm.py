@@ -182,6 +182,15 @@ class BasicTestCases(HappySMSCTestCase):
         yield self._test(r'jcli : ', commands)
 
     @defer.inlineCallbacks
+    def test_add_with_prio_max_and_show(self):
+        cid = 'operator_prio_max'
+        extraCommands = [{'command': 'cid %s' % cid}, {'command': 'prio_max 2'}]
+        yield self.add_connector(r'jcli : ', extraCommands)
+
+        commands = [{'command': 'smppccm -s %s' % cid, 'expect': r'prio_max 2'}]
+        yield self._test(r'jcli : ', commands)
+
+    @defer.inlineCallbacks
     def test_show_invalid_cid(self):
         commands = [{'command': 'smppccm -s invalid_cid', 'expect': r'Unknown connector\: invalid_cid'}]
         yield self._test(r'jcli : ', commands)
