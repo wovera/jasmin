@@ -746,23 +746,20 @@ class SMPPClientManagerPB(pb.Avatar):
                     yield self.redisClient.expire(hashKey, source_connector.factory.config.dlr_expiry)
 
             try:
-                if self.submit_chan is None:
-                    raise RuntimeError('submit_chan is not open')
                 yield self.submit_chan.basic_publish(
                     exchange='messaging', routing_key=pubQueueName,
                     body=c.pika_body, properties=c.pika_properties, mandatory=True)
-            except Exception:
+            except Exception as e:
+                self.log.error('Submit publish [msgid:%s] not confirmed: %s', msgid, e)
                 publish_not_confirmed = True
                 raise
-            if connector.get('sm_listener') is not None:
-                connector['sm_listener'].last_ready_count += 1
-        except Exception as e:
+            connector['sm_listener'].last_ready_count += 1
+        except Exception:
             # Release the claim on ANY post-claim failure, not only a failed publish: left held, the caller's
             # retry is answered "already accepted" for a message that never reached the queue.
             if idem_key is not None:
                 yield self.redisClient.delete(idem_key)
             if publish_not_confirmed:
-                self.log.error('Submit publish [msgid:%s] not confirmed: %s', msgid, e)
                 defer.returnValue(False)
             raise
 

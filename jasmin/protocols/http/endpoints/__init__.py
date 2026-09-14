@@ -3,10 +3,13 @@
 
 """Jasmin SMS Gateway by Jookies LTD <jasmin@jookies.net>"""
 import binascii
+import re
 
 import messaging.sms.gsm0338  # noqa: F401  (registers the 'gsm0338' codec encode_short_message asks for)
 
 from jasmin.protocols.http.errors import UrlArgsValidationError, AuthenticationError
+
+TAG_PATTERN = re.compile(rb'^[A-Za-z0-9_.:-]{1,64}$')
 
 
 def hex2bin(hex_content):

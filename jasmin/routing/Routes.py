@@ -226,18 +226,15 @@ class RoundrobinRoute:
     def getConnector(self):
         return random.choice(self.connector)
 
-    def getBoundConnector(self, isBound, depthOf=None):
+    def getBoundConnector(self, isBound, depthOf):
         """Pick among the connectors the caller reports bound, None when none of them is.
 
         Routing to an unbound connector enqueues a message that connector cannot deliver, and it ages out
-        silently instead of failing. Without depthOf the pick is random; with it, ties broken at random,
-        the smallest ready count wins.
+        silently instead of failing.
         """
         bound = [c for c in self.connector if isBound(c.cid)]
         if not bound:
             return None
-        if depthOf is None:
-            return random.choice(bound)
         return min(bound, key=lambda c: (depthOf(c.cid), random.random()))
 
 

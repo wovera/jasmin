@@ -51,40 +51,6 @@ class SubmitConfirmTestCase(TestCase):
         self.assertEqual(manager.getConnector('confirm-probe')['sm_listener'].last_ready_count, 0)
 
     @defer.inlineCallbacks
-    def test_a_publish_on_a_stale_channel_is_refused_too(self):
-        manager = self._manager()
-        manager.submit_chan.basic_publish = Mock(side_effect=Exception('channel is closed'))
-
-        result = yield manager.perspective_submit_sm(
-            uid='test-uid',
-            cid='confirm-probe',
-            SubmitSmPDU=self._pdu(),
-            submit_sm_bill=None,
-            pickled=False)
-
-        self.assertIs(result, False)
-
-    @defer.inlineCallbacks
-    def test_a_publish_with_no_open_channel_is_refused_not_acknowledged(self):
-        manager = self._manager()
-        manager.submit_chan = None
-        manager.redisClient = Mock()
-        manager.redisClient.set = Mock(return_value=defer.succeed(True))
-        manager.redisClient.delete = Mock(return_value=defer.succeed(1))
-
-        result = yield manager.perspective_submit_sm(
-            uid='test-uid',
-            cid='confirm-probe',
-            SubmitSmPDU=self._pdu(),
-            submit_sm_bill=None,
-            pickled=False,
-            msgid='88888888-8888-8888-8888-888888888888')
-
-        self.assertIs(result, False)
-        manager.redisClient.delete.assert_called_once_with(
-            'idem:88888888-8888-8888-8888-888888888888')
-
-    @defer.inlineCallbacks
     def test_unconfirmed_publish_releases_the_idempotency_mark(self):
         manager = self._manager()
         manager.submit_chan.basic_publish = Mock(side_effect=UnroutableError([]))
@@ -103,6 +69,27 @@ class SubmitConfirmTestCase(TestCase):
         self.assertIs(result, False)
         manager.redisClient.delete.assert_called_once_with(
             'idem:77777777-7777-7777-7777-777777777777')
+
+    @defer.inlineCallbacks
+    def test_a_publish_with_no_open_channel_is_refused_and_releases_the_idempotency_mark(self):
+        manager = self._manager()
+        manager.submit_chan = None
+        manager.redisClient = Mock()
+        manager.redisClient.set = Mock(return_value=defer.succeed(True))
+        manager.redisClient.delete = Mock(return_value=defer.succeed(1))
+
+        result = yield manager.perspective_submit_sm(
+            uid='test-uid',
+            cid='confirm-probe',
+            SubmitSmPDU=self._pdu(),
+            submit_sm_bill=None,
+            pickled=False,
+            msgid='88888888-8888-8888-8888-888888888888')
+
+        self.assertIs(result, False)
+        manager.redisClient.delete.assert_called_once_with(
+            'idem:88888888-8888-8888-8888-888888888888')
+        self.assertEqual(manager.getConnector('confirm-probe')['sm_listener'].last_ready_count, 0)
 
     @defer.inlineCallbacks
     def test_confirmed_publish_increments_the_ready_count(self):

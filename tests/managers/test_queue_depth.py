@@ -1,44 +1,28 @@
-import pickle
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import Mock
 
 from twisted.internet import defer
 from twisted.trial.unittest import TestCase
 
 from jasmin.managers.clients import SMPPClientManagerPB
-from jasmin.managers.configs import SMPPClientPBConfig, SMPPClientSMListenerConfig
-from jasmin.managers.listeners import SMPPClientSMListener
+from jasmin.managers.configs import SMPPClientPBConfig
 from jasmin.protocols.smpp.configs import SMPPClientConfig
-from jasmin.protocols.smpp.operations import SMPPOperationFactory
+from tests.managers.listener_fixture import ListenerFixture
 
 
-class QueueDepthListenerTestCase(TestCase):
+class QueueDepthListenerTestCase(ListenerFixture, TestCase):
     def _listener(self):
-        client_config = SMPPClientConfig(id='depth-probe')
-        client_config.submit_sm_throughput = 0
-        client_factory = Mock()
-        client_factory.config = client_config
-        client_factory.smpp = Mock()
-        client_factory.smpp.isBound = Mock(return_value=True)
-        client_factory.smpp.sendDataRequest = Mock(side_effect=Exception('boom'))
-        broker = Mock()
-        broker.connected = True
-        broker.publish = Mock(return_value=defer.succeed(None))
-        listener = SMPPClientSMListener(SMPPClientSMListenerConfig(), client_factory, broker, Mock())
-        listener.submit_sm_q = Mock()
-        listener.submit_sm_q.get.return_value = defer.Deferred()
+        listener, _ = super()._listener('depth-probe')
+        listener.SMPPClientFactory.smpp = Mock()
+        listener.SMPPClientFactory.smpp.isBound = Mock(return_value=True)
+        listener.SMPPClientFactory.smpp.sendDataRequest = Mock(side_effect=Exception('boom'))
         listener.rejectMessage = Mock(return_value=defer.succeed(None))
         return listener
 
     def _message(self, created_at=None, with_created_at=True):
-        pdu = SMPPOperationFactory(SMPPClientConfig(id='depth-probe')).SubmitSM(
-            source_addr='1423', destination_addr='06155423', short_message='Hello')
-        headers = {'expiration': str(datetime.now() + timedelta(hours=1))}
-        if with_created_at:
-            headers['created_at'] = str(created_at or datetime.now())
-        message = Mock()
-        message.content.properties = {'message-id': 'depth-probe', 'headers': headers}
-        message.content.body = pickle.dumps(pdu)
+        message = super()._message('depth-probe', created_at=created_at)
+        if not with_created_at:
+            del message.content.properties['headers']['created_at']
         return message
 
     def test_oldest_ready_age_seconds_is_none_before_any_dequeue(self):
@@ -72,23 +56,25 @@ class QueueDepthListenerTestCase(TestCase):
 
 
 class QueueDepthManagerTestCase(TestCase):
-    def _manager(self):
+    def _manager(self, cid=None, sm_listener=None, chan=None):
         config = SMPPClientPBConfig()
         config.authentication = False
-        return SMPPClientManagerPB(config)
+        manager = SMPPClientManagerPB(config)
+        if cid is not None:
+            manager.connectors.append({
+                'id': cid,
+                'config': SMPPClientConfig(id=cid),
+                'service': Mock(),
+                'chan': chan,
+                'consumer_tag': None,
+                'submit_sm_q': None,
+                'sm_listener': sm_listener or Mock(),
+            })
+        return manager
 
     @defer.inlineCallbacks
     def test_connector_with_no_chan_returns_both_none(self):
-        manager = self._manager()
-        manager.connectors.append({
-            'id': 'no-chan-probe',
-            'config': SMPPClientConfig(id='no-chan-probe'),
-            'service': Mock(),
-            'chan': None,
-            'consumer_tag': None,
-            'submit_sm_q': None,
-            'sm_listener': Mock(),
-        })
+        manager = self._manager('no-chan-probe')
 
         depth = yield manager.perspective_connector_depth('no-chan-probe')
 
@@ -96,17 +82,8 @@ class QueueDepthManagerTestCase(TestCase):
 
     @defer.inlineCallbacks
     def test_a_failing_status_channel_returns_both_none_and_is_dropped(self):
-        manager = self._manager()
         sm_listener = Mock()
-        manager.connectors.append({
-            'id': 'failing-chan-probe',
-            'config': SMPPClientConfig(id='failing-chan-probe'),
-            'service': Mock(),
-            'chan': Mock(),
-            'consumer_tag': None,
-            'submit_sm_q': None,
-            'sm_listener': sm_listener,
-        })
+        manager = self._manager('failing-chan-probe', sm_listener, Mock())
         status_chan = Mock()
         status_chan.queue_declare = Mock(return_value=defer.fail(Exception('queue gone')))
         manager.amqpBroker = Mock()
@@ -120,18 +97,9 @@ class QueueDepthManagerTestCase(TestCase):
 
     @defer.inlineCallbacks
     def test_an_idle_queue_reports_a_zero_oldest_age(self):
-        manager = self._manager()
         sm_listener = Mock()
         sm_listener.oldest_ready_age_seconds = Mock(return_value=3600.0)
-        manager.connectors.append({
-            'id': 'idle-probe',
-            'config': SMPPClientConfig(id='idle-probe'),
-            'service': Mock(),
-            'chan': Mock(),
-            'consumer_tag': None,
-            'submit_sm_q': None,
-            'sm_listener': sm_listener,
-        })
+        manager = self._manager('idle-probe', sm_listener, Mock())
         declared = Mock()
         declared.method.message_count = 0
         status_chan = Mock()
@@ -145,16 +113,7 @@ class QueueDepthManagerTestCase(TestCase):
 
     @defer.inlineCallbacks
     def test_a_broker_that_cannot_open_a_channel_returns_both_none(self):
-        manager = self._manager()
-        manager.connectors.append({
-            'id': 'down-broker-probe',
-            'config': SMPPClientConfig(id='down-broker-probe'),
-            'service': Mock(),
-            'chan': Mock(),
-            'consumer_tag': None,
-            'submit_sm_q': None,
-            'sm_listener': Mock(),
-        })
+        manager = self._manager('down-broker-probe', chan=Mock())
         manager.amqpBroker = Mock()
         manager.amqpBroker.newChannel = Mock(return_value=defer.fail(Exception('broker down')))
 
@@ -164,54 +123,15 @@ class QueueDepthManagerTestCase(TestCase):
         self.assertIsNone(manager.status_chan)
 
     @defer.inlineCallbacks
-    def test_a_successful_publish_increments_the_ready_count(self):
-        manager = self._manager()
-        sm_listener = Mock()
-        sm_listener.last_ready_count = 0
-        manager.connectors.append({
-            'id': 'increment-probe',
-            'config': SMPPClientConfig(id='increment-probe'),
-            'service': Mock(),
-            'chan': Mock(),
-            'consumer_tag': None,
-            'submit_sm_q': None,
-            'sm_listener': sm_listener,
-        })
-        manager.amqpBroker = Mock()
-        manager.amqpBroker.connected = True
-        manager.submit_chan = Mock()
-        manager.submit_chan.basic_publish = Mock(return_value=defer.succeed(None))
-
-        pdu = SMPPOperationFactory(SMPPClientConfig(id='increment-probe')).SubmitSM(
-            source_addr='1423', destination_addr='06155423', short_message='Hello')
-
-        yield manager.perspective_submit_sm(
-            uid='test-uid',
-            cid='increment-probe',
-            SubmitSmPDU=pdu,
-            submit_sm_bill=None,
-            pickled=False)
-
-        self.assertEqual(sm_listener.last_ready_count, 1)
-
-    @defer.inlineCallbacks
     def test_a_stop_with_delqueues_prunes_the_broker_queue_cache(self):
-        manager = self._manager()
         sm_listener = Mock()
         sm_listener.rejectTimers = {}
         service = Mock()
         service.running = 1
         chan = Mock()
         chan.queue_delete = Mock(return_value=defer.succeed(None))
-        manager.connectors.append({
-            'id': 'stop-probe',
-            'config': SMPPClientConfig(id='stop-probe'),
-            'service': service,
-            'chan': chan,
-            'consumer_tag': None,
-            'submit_sm_q': None,
-            'sm_listener': sm_listener,
-        })
+        manager = self._manager('stop-probe', sm_listener, chan)
+        manager.connectors[0]['service'] = service
         manager.amqpBroker = Mock()
         manager.amqpBroker.queues = ['submit.sm.stop-probe', 'other-queue']
 

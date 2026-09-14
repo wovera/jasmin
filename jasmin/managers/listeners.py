@@ -19,7 +19,7 @@ from jasmin.managers.content import SubmitSmRespContent, DeliverSmContent, Submi
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.tools.jitter import jittered
 from jasmin.protocols.smpp.error import *
-from jasmin.protocols.smpp.operations import SMPPOperationFactory
+from jasmin.protocols.smpp.operations import SMPPOperationFactory, count_pdus
 from jasmin.tools.tlv import format_tlvs_for_log
 from jasmin.routing.Routables import RoutableDeliverSm
 from jasmin.routing.jasminApi import Connector
@@ -65,11 +65,7 @@ class SMPPClientSMListener:
         self.qosTimer = None
         self.last_dequeued_created_at = None
         self.last_ready_count = 0
-        self.learned_rate = (
-            qos.LearnedRate(self.SMPPClientFactory.config.submit_sm_throughput)
-            if self.SMPPClientFactory.config.submit_sm_throughput > 0
-            else None
-        )
+        self.learned_rate = None
 
         # Set pickleProtocol
         self.pickleProtocol = SMPPClientPBConfig(self.config.config_file).pickle_protocol
@@ -337,17 +333,11 @@ class SMPPClientSMListener:
                 throughput = self.SMPPClientFactory.config.submit_sm_throughput
                 if self.learned_rate is None or self.learned_rate.ceiling != float(throughput):
                     self.learned_rate = qos.LearnedRate(throughput)
-                    self.SMPPClientFactory.config.learned_throughput = self.learned_rate.current
-                parts = 1
-                pdu = SubmitSmPDU
-                while hasattr(pdu, 'nextPdu'):
-                    parts += 1
-                    pdu = pdu.nextPdu
                 qos_slow_down = qos.throttle_delay(
                     self.learned_rate.current,
                     self.qos_last_submit_sm_at,
                     datetime.now(),
-                    count=parts)
+                    count=count_pdus(SubmitSmPDU))
                 if qos_slow_down > 0:
                     self.log.debug(
                         "QoS: submit_sm_callback faster than throughput (%s/s), slowing down %ss.",
@@ -397,7 +387,6 @@ class SMPPClientSMListener:
 
                 if self.learned_rate:
                     self.learned_rate.clean(datetime.now())
-                    self.SMPPClientFactory.config.learned_throughput = self.learned_rate.current
 
                 # Get bill information
                 if submit_sm_resp_bill is not None and submit_sm_resp_bill.getTotalAmounts() > 0:
@@ -465,24 +454,19 @@ class SMPPClientSMListener:
                     logged_content,
                     format_tlvs_for_log(_pdu, self.config.log_privacy))
             else:
-                # Message must be retried ?
-                if r.response.status == CommandStatus.ESME_RTHROTTLED and self.learned_rate:
+                throttled = r.response.status == CommandStatus.ESME_RTHROTTLED and self.learned_rate
+                if throttled:
                     self.learned_rate.throttled()
-                    self.SMPPClientFactory.config.learned_throughput = self.learned_rate.current
 
-                    if self.submit_retrials[msgid] < self.config.submit_error_retrial.get(
-                            r.response.status.name, {'count': 0})['count']:
-                        yield self.rejectAndRequeueMessage(amqpMessage, delay=False)
-                        will_be_retried = True
-                    else:
-                        del self.submit_retrials[msgid]
-                elif r.response.status.name in self.config.submit_error_retrial:
+                # Message must be retried ?
+                if r.response.status.name in self.config.submit_error_retrial:
                     retrial = self.config.submit_error_retrial[r.response.status.name]
+                    delay = False if throttled else retrial['delay']
 
                     # Still have some retries to go ?
                     if self.submit_retrials[msgid] < retrial['count']:
                         # Requeue the message for later redelivery
-                        yield self.rejectAndRequeueMessage(amqpMessage, delay=retrial['delay'])
+                        yield self.rejectAndRequeueMessage(amqpMessage, delay=delay)
                         will_be_retried = True
                     else:
                         # Prevent this list from over-growing

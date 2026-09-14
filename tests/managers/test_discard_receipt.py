@@ -3,50 +3,25 @@ import pickle
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
-from smpp.pdu.pdu_types import CommandId, CommandStatus
+from smpp.pdu.pdu_types import CommandStatus
 from twisted.internet import defer
 from twisted.trial.unittest import TestCase
 
-from jasmin.managers.configs import DLRLookupConfig, SMPPClientSMListenerConfig
+from jasmin.managers.configs import DLRLookupConfig
 from jasmin.managers.content import Discard
 from jasmin.managers.dlr import DLRLookup
-from jasmin.managers.listeners import SMPPClientSMListener
-from jasmin.protocols.smpp.configs import SMPPClientConfig
-from jasmin.protocols.smpp.operations import SMPPOperationFactory
+from jasmin.tools.qos import LearnedRate
+from tests.managers.listener_fixture import ListenerFixture
 
 
-class DiscardReceiptTestCase(TestCase):
+class DiscardReceiptTestCase(ListenerFixture, TestCase):
     def _listener(self, submit_sm_throughput=0):
-        client_config = SMPPClientConfig(id='discard-probe')
-        client_config.submit_sm_throughput = submit_sm_throughput
-        client_factory = Mock()
-        client_factory.config = client_config
-        client_factory.smpp = None
-        broker = Mock()
-        broker.connected = True
-        broker.publish = Mock(return_value=defer.succeed(None))
-        listener = SMPPClientSMListener(SMPPClientSMListenerConfig(), client_factory, broker, Mock())
-        listener.submit_sm_q = Mock()
-        listener.submit_sm_q.get.return_value = defer.Deferred()
+        listener, broker = super()._listener('discard-probe', submit_sm_throughput)
         listener.rejectMessage = Mock(return_value=defer.succeed(None))
         return listener, broker
 
     def _message(self, expiration=None, created_at=None, body=None):
-        if expiration is None:
-            expiration = datetime.now() + timedelta(hours=1)
-        if created_at is None:
-            created_at = datetime.now()
-        if body is None:
-            pdu = SMPPOperationFactory(SMPPClientConfig(id='discard-probe')).SubmitSM(
-                source_addr='1423', destination_addr='06155423', short_message='Hello')
-            body = pickle.dumps(pdu)
-        message = Mock()
-        message.content.properties = {
-            'message-id': 'discard-probe',
-            'headers': {'expiration': str(expiration), 'created_at': str(created_at)},
-        }
-        message.content.body = body
-        return message
+        return super()._message('discard-probe', expiration, created_at, body)
 
     @defer.inlineCallbacks
     def test_expired_message_emits_a_discard_receipt(self):
@@ -143,30 +118,16 @@ class DiscardReceiptTestCase(TestCase):
         self.assertEqual(discard_calls, [])
 
 
-class ThrottleRequeueTestCase(TestCase):
+class ThrottleRequeueTestCase(ListenerFixture, TestCase):
     def _listener(self, submit_sm_throughput=0):
-        client_config = SMPPClientConfig(id='throttle-probe')
-        client_config.submit_sm_throughput = submit_sm_throughput
-        client_factory = Mock()
-        client_factory.config = client_config
-        client_factory.smpp = None
-        broker = Mock()
-        broker.connected = True
-        broker.publish = Mock(return_value=defer.succeed(None))
-        listener = SMPPClientSMListener(SMPPClientSMListenerConfig(), client_factory, broker, Mock())
-        listener.submit_sm_q = Mock()
-        listener.submit_sm_q.get.return_value = defer.Deferred()
+        listener, _ = super()._listener('throttle-probe', submit_sm_throughput)
+        if submit_sm_throughput > 0:
+            listener.learned_rate = LearnedRate(submit_sm_throughput)
         listener.ackMessage = Mock(return_value=defer.succeed(None))
         return listener
 
     def _resp(self, status):
-        pdu = SMPPOperationFactory(SMPPClientConfig(id='throttle-probe')).SubmitSM(
-            source_addr='1423', destination_addr='06155423', short_message='Hello')
-        r = Mock()
-        r.request = pdu
-        r.response = Mock()
-        r.response.status = status
-        return r
+        return super()._resp('throttle-probe', status)
 
     def _amqp_message(self, msgid='throttle-probe'):
         message = Mock()
@@ -184,7 +145,6 @@ class ThrottleRequeueTestCase(TestCase):
 
         listener.rejectAndRequeueMessage.assert_called_once_with(amqp_message, delay=False)
         self.assertEqual(listener.learned_rate.current, 5)
-        self.assertEqual(listener.SMPPClientFactory.config.learned_throughput, 5)
 
     @defer.inlineCallbacks
     def test_msgqful_response_takes_the_delayed_path_and_keeps_the_pacer(self):
@@ -221,19 +181,10 @@ class ThrottleRequeueTestCase(TestCase):
         listener.SMPPClientFactory.smpp = Mock()
         listener.SMPPClientFactory.smpp.isBound = Mock(return_value=True)
 
-        pdu = SMPPOperationFactory(SMPPClientConfig(id='throttle-probe')).SubmitSM(
-            source_addr='1423', destination_addr='06155423', short_message='Hello')
-        r = Mock()
-        r.request = pdu
-        r.response = Mock()
-        r.response.status = CommandStatus.ESME_ROK
-        r.response.params = {'message_id': b'01'}
-        r.response.id = CommandId.submit_sm_resp
-        listener.SMPPClientFactory.smpp.sendDataRequest = Mock(return_value=defer.succeed(r))
-
-        message = Mock()
-        message.content.properties = {'message-id': 'throttle-probe', 'priority': 1, 'headers': {}}
-        message.content.body = pickle.dumps(pdu)
+        response = self._resp(CommandStatus.ESME_ROK)
+        listener.SMPPClientFactory.smpp.sendDataRequest = Mock(return_value=defer.succeed(response))
+        message = self._message('throttle-probe')
+        message.content.properties['priority'] = 1
 
         yield listener.submit_sm_callback(message)
 

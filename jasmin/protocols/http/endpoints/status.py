@@ -29,15 +29,16 @@ class Status(Resource):
                 connector = self.SMPPClientManagerPB.getConnector(cid)
                 if connector is None:
                     continue
-                details = self.SMPPClientManagerPB.perspective_connector_details(cid) or {}
                 config = connector['config']
+                listener = connector['sm_listener']
                 depth = yield self.SMPPClientManagerPB.perspective_connector_depth(cid)
                 stats = SMPPClientStatsCollector().get(cid)
                 connectors.append({
                     'cid': cid,
-                    'session_state': details.get('session_state', ''),
+                    'session_state': listed['session_state'],
                     'submit_sm_throughput': config.submit_sm_throughput,
-                    'learned_throughput': getattr(config, 'learned_throughput', config.submit_sm_throughput),
+                    'learned_throughput': (listener.learned_rate.current if listener.learned_rate
+                                           else config.submit_sm_throughput),
                     'messages_ready': depth['messages_ready'],
                     'oldest_ready_age_seconds': depth['oldest_ready_age_seconds'],
                     'throttling_error_count': stats.get('throttling_error_count'),

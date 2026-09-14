@@ -23,7 +23,7 @@ from jasmin.protocols.http.errors import (HttpApiError, AuthenticationError, Ser
                      RouteNotFoundError, ConnectorNotFoundError,
                      ChargingError, ThroughputExceededError, InterceptorNotSetError,
                      InterceptorNotConnectedError, InterceptorRunError)
-from jasmin.protocols.http.endpoints import authenticate_user, encode_short_message
+from jasmin.protocols.http.endpoints import TAG_PATTERN, authenticate_user, encode_short_message
 
 
 def update_submit_sm_pdu(routable, config, config_update_params=None):
@@ -66,7 +66,8 @@ def update_submit_sm_pdu(routable, config, config_update_params=None):
     return routable
 
 
-LANE_PRECEDENCE = {b'transactional': 3, b'bulk': 0}
+LANE_TRANSACTIONAL = 3
+LANE_BULK = 0
 
 
 class Send(Resource):
@@ -265,7 +266,7 @@ class Send(Resource):
             param_updates = {}
 
             lane = updated_request.args.get(b'lane', [b'transactional'])[0]
-            priority = LANE_PRECEDENCE[lane]
+            priority = LANE_BULK if lane == b'bulk' else LANE_TRANSACTIONAL
             priority_flag = None
             if b'priority' in updated_request.args:
                 wanted = int(updated_request.args[b'priority'][0])
@@ -465,8 +466,8 @@ class Send(Resource):
                       # through HttpAPICredentialValidator
                       b'priority': {'optional': True, 'pattern': re.compile(rb'^[0-3]$')},
                       b'lane': {'optional': True, 'pattern': re.compile(rb'^(transactional|bulk)$')},
-                      b'tag_batch': {'optional': True, 'pattern': re.compile(rb'^[A-Za-z0-9_.:-]{1,64}$')},
-                      b'tag_account': {'optional': True, 'pattern': re.compile(rb'^[A-Za-z0-9_.:-]{1,64}$')},
+                      b'tag_batch': {'optional': True, 'pattern': TAG_PATTERN},
+                      b'tag_account': {'optional': True, 'pattern': TAG_PATTERN},
                       b'sdt': {'optional': True,
                               'pattern': re.compile(rb'^\d{2}\d{2}\d{2}\d{2}\d{2}\d{2}\d{1}\d{2}(\+|-|R)$')},
                       # Validity period validation pattern can be validated/filtered further more

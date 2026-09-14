@@ -7,9 +7,7 @@ from twisted.web.server import NOT_DONE_YET
 
 from jasmin.protocols.http.validation import UrlArgsValidator
 from jasmin.protocols.http.errors import HttpApiError, UrlArgsValidationError, ServerError, ERROR_CODE_HEADER
-from jasmin.protocols.http.endpoints import authenticate_user
-
-TAG = re.compile(rb'^[A-Za-z0-9_.:-]{1,64}$')
+from jasmin.protocols.http.endpoints import TAG_PATTERN, authenticate_user
 
 
 class Revoke(Resource):
@@ -37,8 +35,8 @@ class Revoke(Resource):
         try:
             fields = {b'username': {'optional': False, 'pattern': re.compile(rb'^.{1,16}$')},
                       b'password': {'optional': False, 'pattern': re.compile(rb'^.{1,16}$')},
-                      b'batch': {'optional': True, 'pattern': TAG},
-                      b'account': {'optional': True, 'pattern': TAG},
+                      b'batch': {'optional': True, 'pattern': TAG_PATTERN},
+                      b'account': {'optional': True, 'pattern': TAG_PATTERN},
                       b'ttl': {'optional': False, 'pattern': re.compile(rb'^[1-9][0-9]{0,7}$')}}
             UrlArgsValidator(request, fields).validate()
             if b'batch' not in request.args and b'account' not in request.args:
