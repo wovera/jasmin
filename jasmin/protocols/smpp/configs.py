@@ -198,6 +198,10 @@ class SMPPClientConfig:
         if self.dlr_msg_id_bases not in [0, 1, 2]:
             raise UnknownValue('Invalid dlr_msg_id_bases: %s' % self.dlr_msg_id_bases)
 
+        self.dlr_scope = kwargs.get('dlr_scope', '')
+        if not isinstance(self.dlr_scope, str):
+            raise TypeMismatch('dlr_scope must be a string')
+
         # Per-connector custom TLV validation rules (no default-value injection).
         # Each entry is a dict:
         #   {'tag': int, 'type': str, 'length': int|None, 'required': bool}

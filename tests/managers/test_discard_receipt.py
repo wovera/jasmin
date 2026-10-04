@@ -33,6 +33,7 @@ class DiscardReceiptTestCase(ListenerFixture, TestCase):
         self.assertEqual(kwargs['routing_key'], 'dlr.discard')
         self.assertEqual(kwargs['content'].properties['message-id'], 'discard-probe')
         self.assertEqual(kwargs['content'].properties['headers']['discard_reason'], 'expired')
+        self.assertEqual(kwargs['content'].properties['headers']['connector'], 'discard-probe')
 
     @defer.inlineCallbacks
     def test_non_submit_sm_object_emits_a_discard_receipt(self):
@@ -207,7 +208,7 @@ class DiscardForwardTestCase(TestCase):
         lookup.forward_chan.basic_publish = Mock(return_value=defer.succeed(None))
         lookup.ackMessage = Mock(return_value=defer.succeed(None))
         message = Mock()
-        content = Discard('m1', 'revoked')
+        content = Discard('m1', 'revoked', 'smppc-1')
         message.content = content
         message.routing_key = 'dlr.discard'
 
@@ -217,6 +218,7 @@ class DiscardForwardTestCase(TestCase):
         self.assertEqual(body['msgid'], 'm1')
         self.assertEqual(body['command_status'], 'DISCARDED')
         self.assertEqual(body['discard_reason'], 'revoked')
+        self.assertEqual(body['connector'], 'smppc-1')
         self.assertTrue(lookup.forward_chan.basic_publish.call_args.kwargs['mandatory'])
         redis.delete.assert_called_once_with('dlr:m1')
         lookup.ackMessage.assert_called_once()

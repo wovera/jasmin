@@ -60,6 +60,45 @@ class IdempotentSubmitTestCases(SMPPClientPBProxyTestCase):
         self.assertEqual((yield self.queued(cid)), 1)
 
     @defer.inlineCallbacks
+    def test_a_deduplicated_retry_answers_the_connector_first_accepted_for(self):
+        yield self.connect('127.0.0.1', self.pbPort)
+        yield self.add(self.defaultConfig)
+        yield self.add(SMPPClientConfig(id='otherId'))
+        yield waitFor(1)
+        msgid = '77777777-7777-7777-7777-777777777777'
+
+        first = yield self.clientManagerPB.perspective_submit_sm(
+            uid=self.uid, cid=self.defaultConfig.id, SubmitSmPDU=self.SubmitSmPDU, submit_sm_bill=None,
+            pickled=False, msgid=msgid, answer_connector=True)
+        retry = yield self.clientManagerPB.perspective_submit_sm(
+            uid=self.uid, cid='otherId', SubmitSmPDU=self.SubmitSmPDU, submit_sm_bill=None,
+            pickled=False, msgid=msgid, answer_connector=True)
+
+        self.assertEqual(first, (msgid, self.defaultConfig.id))
+        self.assertEqual(retry, (msgid, self.defaultConfig.id))
+        self.assertEqual((yield self.queued('otherId')), 0)
+
+    @defer.inlineCallbacks
+    def test_a_retry_after_its_connector_is_retired_replays_the_first_acceptance(self):
+        yield self.connect('127.0.0.1', self.pbPort)
+        yield self.add(self.defaultConfig)
+        yield self.add(SMPPClientConfig(id='otherId'))
+        yield waitFor(1)
+        msgid = '88888888-8888-8888-8888-888888888888'
+
+        first = yield self.clientManagerPB.perspective_submit_sm(
+            uid=self.uid, cid=self.defaultConfig.id, SubmitSmPDU=self.SubmitSmPDU, submit_sm_bill=None,
+            pickled=False, msgid=msgid, answer_connector=True)
+        yield self.clientManagerPB.perspective_connector_remove(self.defaultConfig.id)
+        retry = yield self.clientManagerPB.perspective_submit_sm(
+            uid=self.uid, cid='otherId', SubmitSmPDU=self.SubmitSmPDU, submit_sm_bill=None,
+            pickled=False, msgid=msgid, answer_connector=True)
+
+        self.assertEqual(first, (msgid, self.defaultConfig.id))
+        self.assertEqual(retry, (msgid, self.defaultConfig.id))
+        self.assertEqual((yield self.queued('otherId')), 0)
+
+    @defer.inlineCallbacks
     def test_missing_redis_fails_closed(self):
         yield self.connect('127.0.0.1', self.pbPort)
         yield self.add(self.defaultConfig)

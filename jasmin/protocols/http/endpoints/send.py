@@ -17,7 +17,7 @@ from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageEx
 from jasmin.tools.tlv import format_tlvs_for_log
 from jasmin.tools.tlv_encoder import normalize_custom_tlvs
 from jasmin.protocols.http.errors import (UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER,
-                                          SEGMENT_COUNT_HEADER)
+                                          SEGMENT_COUNT_HEADER, CONNECTOR_HEADER)
 from jasmin.protocols.http.validation import UrlArgsValidator, HttpAPICredentialValidator
 from jasmin.protocols.http.errors import (HttpApiError, AuthenticationError, ServerError, SubmitNotConfirmedError,
                      RouteNotFoundError, ConnectorNotFoundError,
@@ -375,7 +375,8 @@ class Send(Resource):
                 dlr_connector=routedConnector.cid,
                 msgid=client_msgid,
                 tags={k[4:].decode(): v[0].decode()
-                      for k, v in updated_request.args.items() if k in (b'tag_batch', b'tag_account')})
+                      for k, v in updated_request.args.items() if k in (b'tag_batch', b'tag_account')},
+                answer_connector=True)
 
             # a falsy or Failure result must never render as Success 200
             if not c or isinstance(c, Failure):
@@ -388,7 +389,7 @@ class Send(Resource):
                 self.stats.inc('success_count')
                 self.stats.set('last_success_at', datetime.now())
                 self.log.debug('SubmitSmPDU sent to [cid:%s], result = %s', routedConnector.cid, c)
-                response = {'return': c, 'status': 200}
+                response = {'return': c[0], 'status': 200, 'connector': c[1]}
         except HttpApiError as e:
             self.log.error("Error: %s", e)
             response = {'return': e.message, 'status': e.code, 'token': e.token}
@@ -403,6 +404,8 @@ class Send(Resource):
                 updated_request.setHeader(ERROR_CODE_HEADER, response['token'])
             if response['status'] == 200 and routedConnector is not None:
                 updated_request.setHeader(SEGMENT_COUNT_HEADER, str(count_pdus(routable.pdu)))
+                if response.get('connector') is not None:
+                    updated_request.setHeader(CONNECTOR_HEADER, response['connector'])
 
             # Default return
             _return = 'Error "%s"' % response['return']

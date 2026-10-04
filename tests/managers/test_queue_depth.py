@@ -139,3 +139,24 @@ class QueueDepthManagerTestCase(TestCase):
 
         self.assertNotIn('submit.sm.stop-probe', manager.amqpBroker.queues)
         self.assertIn('other-queue', manager.amqpBroker.queues)
+
+    @defer.inlineCallbacks
+    def test_a_stopped_connector_still_releases_its_consumer_and_queue(self):
+        sm_listener = Mock()
+        sm_listener.rejectTimers = {}
+        service = Mock()
+        service.running = 0
+        chan = Mock()
+        chan.basic_cancel = Mock(return_value=defer.succeed(None))
+        chan.queue_delete = Mock(return_value=defer.succeed(None))
+        manager = self._manager('stopped-probe', sm_listener, chan)
+        manager.connectors[0]['service'] = service
+        manager.connectors[0]['consumer_tag'] = 'tag'
+        manager.amqpBroker = Mock()
+        manager.amqpBroker.queues = ['submit.sm.stopped-probe']
+
+        yield manager.perspective_connector_stop('stopped-probe', delQueues=True)
+
+        chan.basic_cancel.assert_called_once_with(consumer_tag='tag')
+        chan.queue_delete.assert_called_once_with(queue='submit.sm.stopped-probe')
+        self.assertEqual(manager.amqpBroker.queues, [])

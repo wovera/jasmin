@@ -191,6 +191,15 @@ class BasicTestCases(HappySMSCTestCase):
         yield self._test(r'jcli : ', commands)
 
     @defer.inlineCallbacks
+    def test_add_with_dlr_scope_and_show(self):
+        cid = 'operator_dlr_scope'
+        extraCommands = [{'command': 'cid %s' % cid}, {'command': 'dlr_scope ethio-6148'}]
+        yield self.add_connector(r'jcli : ', extraCommands)
+
+        commands = [{'command': 'smppccm -s %s' % cid, 'expect': r'dlr_scope ethio-6148'}]
+        yield self._test(r'jcli : ', commands)
+
+    @defer.inlineCallbacks
     def test_show_invalid_cid(self):
         commands = [{'command': 'smppccm -s invalid_cid', 'expect': r'Unknown connector\: invalid_cid'}]
         yield self._test(r'jcli : ', commands)

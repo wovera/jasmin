@@ -30,6 +30,7 @@ class StatusTestCases(HTTPApiTestCases):
 
         sm_listener = Mock()
         sm_listener.learned_rate = None
+        sm_listener.in_flight = set()
         sm_listener.oldest_ready_age_seconds.return_value = 12.0
 
         self.clientManager_f.connectors.append({
@@ -52,6 +53,7 @@ class StatusTestCases(HTTPApiTestCases):
         self.assertEqual(connector['submit_sm_throughput'], 10)
         self.assertEqual(connector['learned_throughput'], 10)
         self.assertEqual(connector['messages_ready'], 3)
+        self.assertEqual(connector['messages_in_flight'], 0)
         self.assertEqual(connector['oldest_ready_age_seconds'], 12.0)
         self.assertEqual(connector['throttling_error_count'], 0)
 

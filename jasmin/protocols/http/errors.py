@@ -5,6 +5,7 @@ ERROR_CODE_HEADER = 'Jasmin-Error-Code'
 # character carried whole into the next segment can add one that dividing the length never shows. The caller bills
 # on this, so it is reported rather than left to be re-derived from a copy of the splitting rules.
 SEGMENT_COUNT_HEADER = 'Jasmin-Segment-Count'
+CONNECTOR_HEADER = 'Jasmin-Connector'
 
 
 class HttpApiError(Exception):

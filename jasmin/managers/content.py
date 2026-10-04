@@ -52,7 +52,7 @@ class DLR(Content):
     """A DLR is published to dlr.* routes for DLRLookup"""
 
     def __init__(self, pdu_type, msgid, status, smpp_msgid=None, cid=None, dlr_details=None,
-                 smpp_msgids=None):
+                 smpp_msgids=None, dlr_scope=''):
 
         if pdu_type not in (CommandId.deliver_sm, CommandId.data_sm, CommandId.submit_sm_resp):
             raise InvalidParameterError('Invalid pdu_type: %s' % pdu_type.name)
@@ -62,7 +62,7 @@ class DLR(Content):
         elif pdu_type in (CommandId.deliver_sm, CommandId.data_sm) and (cid is None or dlr_details is None):
             raise InvalidParameterError('deliver_sm dlr must have cid and dlr_details args defined')
 
-        properties = {'message-id': str(msgid), 'headers': {'type': pdu_type.name}}
+        properties = {'message-id': str(msgid), 'headers': {'type': pdu_type.name, 'dlr_scope': dlr_scope}}
 
         if pdu_type == CommandId.submit_sm_resp and smpp_msgid is not None:
             # smpp_msgid is used to define mapping between msgid and smpp_msgid (when receiving submit_sm_resp ESME_ROK)
@@ -90,11 +90,12 @@ class Discard(Content):
 
     REASONS = ('expired', 'smppc_not_ready', 'tlv', 'exception', 'revoked')
 
-    def __init__(self, msgid, reason):
+    def __init__(self, msgid, reason, connector=''):
         if reason not in self.REASONS:
             raise InvalidParameterError('Invalid discard reason: %s' % reason)
         Content.__init__(self, reason, properties={
-            'message-id': str(msgid), 'headers': {'type': 'discard', 'discard_reason': reason}})
+            'message-id': str(msgid),
+            'headers': {'type': 'discard', 'discard_reason': reason, 'connector': connector}})
 
 
 class DLRContentForHttpapi(Content):

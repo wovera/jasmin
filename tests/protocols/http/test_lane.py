@@ -13,7 +13,7 @@ class LaneTestCases(HTTPApiTestCases):
 
     def setUp(self):
         HTTPApiTestCases.setUp(self)
-        self.clientManager_f.perspective_submit_sm = Mock(return_value=defer.succeed('msgid'))
+        self.clientManager_f.perspective_submit_sm = Mock(return_value=defer.succeed(('msgid', 'cid')))
 
     @defer.inlineCallbacks
     def test_unknown_lane_is_refused(self):

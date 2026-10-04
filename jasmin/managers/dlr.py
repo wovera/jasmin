@@ -31,6 +31,13 @@ def acknowledged_smpp_msgids(message):
     return [headers['smpp_msgid']]
 
 
+def queue_msgid_key(dlr_scope, smpp_msgid):
+    # An SMSC message id is unique only per account, and a receipt may arrive on any of that account's binds.
+    if dlr_scope:
+        return "queue-msgid:%s:%s" % (dlr_scope, smpp_msgid)
+    return "queue-msgid:%s" % smpp_msgid
+
+
 class RedisError(Exception):
     """Raised for any Redis connectivity problem"""
 
@@ -272,8 +279,10 @@ class DLRLookup:
     def discard_dlr_callback(self, message):
         msgid = message.content.properties['message-id']
         reason = message.content.properties['headers']['discard_reason']
+        connector = message.content.properties['headers'].get('connector', '')
         try:
-            yield self.forward_outcome(msgid, level=1, command_status='DISCARDED', discard_reason=reason)
+            yield self.forward_outcome(msgid, level=1, command_status='DISCARDED', discard_reason=reason,
+                                       connector=connector)
             yield self.redisClient.delete("dlr:%s" % msgid)
         except ForwardError as e:
             self.log.error('Forward of discard[%s] failed, requeuing: %s', msgid, e)
@@ -355,7 +364,7 @@ class DLRLookup:
                         # Map received submit_sm_resp's message_id to the msg for later receipt handling
                         self.log.debug('Mapping smpp msgid: %s to queue msgid: %s, expiring in %s',
                                        smpp_msgid, msgid, dlr_expiry)
-                        hashKey = "queue-msgid:%s" % smpp_msgid
+                        hashKey = queue_msgid_key(message.content.properties['headers'].get('dlr_scope', ''), smpp_msgid)
                         yield self.redisClient.hmset(hashKey, hashValues)
                         yield self.redisClient.expire(hashKey, dlr_expiry)
             elif dlr['sc'] == 'smppsapi':
@@ -406,7 +415,7 @@ class DLRLookup:
                             # Map received submit_sm_resp's message_id to the msg for later rceipt handling
                             self.log.debug('Mapping smpp msgid: %s to queue msgid: %s, expiring in %s',
                                            smpp_msgid, msgid, smpps_map_expiry)
-                            hashKey = "queue-msgid:%s" % smpp_msgid
+                            hashKey = queue_msgid_key(message.content.properties['headers'].get('dlr_scope', ''), smpp_msgid)
                             yield self.redisClient.hmset(hashKey, hashValues)
                             yield self.redisClient.expire(hashKey, smpps_map_expiry)
         except DLRMapError as e:
@@ -453,7 +462,8 @@ class DLRLookup:
             if self.redisClient is None:
                 raise RedisError('RC undefined !')
 
-            q = yield self.redisClient.hgetall("queue-msgid:%s" % msgid)
+            q = yield self.redisClient.hgetall(
+                queue_msgid_key(message.content.properties['headers'].get('dlr_scope', ''), msgid))
             if len(q) != 2 or 'msgid' not in q or 'connector_type' not in q:
                 raise DLRMapNotFound('Got a DLR for an unknown message id: %s (coded:%s)' % (pdu_dlr_id, msgid))
 
@@ -490,7 +500,7 @@ class DLRLookup:
                                                       content=DLRContentForHttpapi(pdu_dlr_status,
                                                                                    submit_sm_queue_id,
                                                                                    dlr_url, dlr_level=2,
-                                                                                   dlr_connector=pdu_dlr_id,
+                                                                                   dlr_connector=pdu_cid,
                                                                                    id_smsc=msgid,
                                                                                    sub=pdu_dlr_sub,
                                                                                    dlvrd=pdu_dlr_dlvrd,
@@ -509,7 +519,7 @@ class DLRLookup:
                         dlvrd=pdu_dlr_dlvrd,
                         submit_date=pdu_dlr_sdate,
                         done_date=pdu_dlr_ddate,
-                        connector=pdu_dlr_id)
+                        connector=pdu_cid)
 
                     if pdu_dlr_status in final_states:
                         self.log.debug('Removing HTTP dlr map for msgid[%s]', submit_sm_queue_id)

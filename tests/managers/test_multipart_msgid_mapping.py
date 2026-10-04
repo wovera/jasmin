@@ -117,3 +117,28 @@ class RedisFanOutTestCase(TestCase):
 
         mapped = [call.args[0] for call in self.redisClient.hmset.call_args_list]
         self.assertEqual(['queue-msgid:SOLO'], mapped)
+
+    @defer.inlineCallbacks
+    def test_a_scoped_bind_maps_under_its_account_scope(self):
+        message = self.submitSmRespMessage('A')
+        message.content.properties['headers']['dlr_scope'] = 'account-1'
+
+        yield self.dlrLookup.submit_sm_resp_dlr_callback(message)
+
+        mapped = [call.args[0] for call in self.redisClient.hmset.call_args_list]
+        self.assertEqual(['queue-msgid:account-1:A'], mapped)
+
+    @defer.inlineCallbacks
+    def test_a_receipt_is_looked_up_under_the_scope_of_the_bind_it_arrived_on(self):
+        self.redisClient.hgetall.return_value = defer.succeed({})
+        self.dlrLookup.rejectAndRequeueMessage = Mock(return_value=defer.succeed(None))
+        self.dlrLookup.rejectMessage = Mock(return_value=defer.succeed(None))
+        headers = {'cid': 'ethio-6148-2', 'dlr_scope': 'account-1', 'dlr_id': 'A', 'dlr_ddate': '', 'dlr_sdate': '',
+                   'dlr_sub': '001', 'dlr_err': '000', 'dlr_text': '', 'dlr_dlvrd': '001'}
+        receipt = SimpleNamespace(
+            content=SimpleNamespace(body=b'DELIVRD', properties={'message-id': 'A', 'headers': headers}),
+            delivery_tag=1)
+
+        yield self.dlrLookup.deliver_sm_dlr_callback(receipt)
+
+        self.assertEqual('queue-msgid:account-1:A', self.redisClient.hgetall.call_args_list[0].args[0])

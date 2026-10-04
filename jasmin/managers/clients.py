@@ -14,7 +14,6 @@ from jasmin.protocols.smpp.services import SMPPClientService
 from jasmin.tools.migrations.configuration import ConfigurationMigrator
 from smpp.pdu.pdu_types import RegisteredDeliveryReceipt
 from smpp.twisted.protocol import SMPPSessionStates
-from jasmin.queues.delivery import DeliveryMessage
 from .configs import SMPPClientSMListenerConfig
 from .content import SubmitSmContent
 from .listeners import SMPPClientSMListener
@@ -436,14 +435,9 @@ class SMPPClientManagerPB(pb.Avatar):
 
         self.log.info('%s is consuming from queue: %s', consumerTag, submit_sm_queue)
 
-        # Set callbacks for every consumed message from submit_sm_queue queue.
-        # The delivery is wrapped in the txamqp-style shim the listener's submit_sm_callback expects.
         sm_listener = connector['sm_listener']
-        d = submit_sm_q.get()
-        d.addCallback(lambda received: sm_listener.submit_sm_callback(DeliveryMessage(received))).addErrback(
-            sm_listener.submit_sm_errback)
-
-        connector['sm_listener'].setSubmitSmQ(submit_sm_q)
+        sm_listener.setSubmitSmQ(submit_sm_q)
+        submit_sm_q.get().addCallback(sm_listener._on_message).addErrback(sm_listener.submit_sm_errback)
         connector['consumer_tag'] = consumerTag
         connector['submit_sm_q'] = submit_sm_q
 
@@ -471,16 +465,16 @@ class SMPPClientManagerPB(pb.Avatar):
             connector['submit_sm_q'] = None
             connector['consumer_tag'] = None
 
-        if connector['service'].running == 0:
-            self.log.error('Connector [%s] is already stopped.', cid)
-            defer.returnValue(False)
-
         if delQueues:
             submitSmQueueName = 'submit.sm.%s' % cid
             self.log.debug('Deleting queue [%s]', submitSmQueueName)
             yield connector['chan'].queue_delete(queue=submitSmQueueName)
             if submitSmQueueName in self.amqpBroker.queues:
                 self.amqpBroker.queues.remove(submitSmQueueName)
+
+        if connector['service'].running == 0:
+            self.log.error('Connector [%s] is already stopped.', cid)
+            defer.returnValue(False)
 
         # Reject & requeue any pending message to avoid loosing messages after
         # clearing timers
@@ -628,8 +622,9 @@ class SMPPClientManagerPB(pb.Avatar):
     @defer.inlineCallbacks
     def perspective_submit_sm(self, uid, cid, SubmitSmPDU, submit_sm_bill, priority=1, validity_period=None,
                               pickled=True, dlr_url=None, dlr_level=1, dlr_method='POST', dlr_connector=None,
-                              source_connector='httpapi', msgid=None, tags=None):
-        """This will enqueue a submit_sm to a connector
+                              source_connector='httpapi', msgid=None, tags=None, answer_connector=False):
+        """This will enqueue a submit_sm to a connector; answer_connector returns (msgid, cid) instead of msgid,
+        naming the connector the message was first accepted for even when a retry is deduplicated.
         """
         connector = self.getConnector(cid)
         if connector is None:
@@ -669,9 +664,12 @@ class SMPPClientManagerPB(pb.Avatar):
                 defer.returnValue(False)
             idem_key = "idem:%s" % msgid
             claimed = yield self.redisClient.set(
-                idem_key, '1', expire=connector['config'].dlr_expiry, only_if_not_exists=True)
+                idem_key, cid, expire=connector['config'].dlr_expiry, only_if_not_exists=True)
             if not claimed:
                 self.log.info('Idempotent submit [msgid:%s] deduplicated; replaying original accept', msgid)
+                if answer_connector:
+                    accepted_cid = yield self.redisClient.get(idem_key)
+                    defer.returnValue((msgid, None if accepted_cid is None else str(accepted_cid)))
                 defer.returnValue(msgid)
 
         publish_not_confirmed = False
@@ -763,4 +761,6 @@ class SMPPClientManagerPB(pb.Avatar):
                 defer.returnValue(False)
             raise
 
+        if answer_connector:
+            defer.returnValue((c.properties['message-id'], cid))
         defer.returnValue(c.properties['message-id'])

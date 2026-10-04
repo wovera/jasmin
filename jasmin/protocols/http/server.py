@@ -13,6 +13,7 @@ from jasmin.protocols.http.endpoints.segments import Segments
 from jasmin.protocols.http.endpoints.ping import Ping
 from jasmin.protocols.http.endpoints.balance import Balance
 from jasmin.protocols.http.endpoints.metrics import Metrics
+from jasmin.protocols.http.endpoints.control import Connectors, MtRoutes, SendUsers
 from jasmin.protocols.http.endpoints.status import Status
 from jasmin.protocols.http.endpoints.revoke import Revoke
 from jasmin.protocols.http.stats import HttpAPIStatsCollector
@@ -61,6 +62,9 @@ class HTTPApi(Resource):
         self.putChild(b'metrics', Metrics(SMPPClientManagerPB, log))
         log.debug("Setting http url routing for /status")
         self.putChild(b'status', Status(SMPPClientManagerPB, log))
+        self.putChild(b'connectors', Connectors(SMPPClientManagerPB, config.control_token, log))
+        self.putChild(b'routes', MtRoutes(RouterPB, SMPPClientManagerPB, config.control_token, log))
+        self.putChild(b'users', SendUsers(RouterPB, config.control_token, log))
         log.debug("Setting http url routing for /revoke")
         self.putChild(b'revoke', Revoke(RouterPB, SMPPClientManagerPB, stats, log))
 

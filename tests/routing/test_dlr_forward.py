@@ -65,6 +65,7 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         agent = Agent(reactor)
         client = HTTPClient(agent)
         response = yield client.post('http://127.0.0.1:1401/send', data=self.params)
+        self.sent_connector = response.headers.getRawHeaders('Jasmin-Connector', [None])[0]
         c = yield text_content(response)
         defer.returnValue(c[9:45])
 
@@ -91,6 +92,8 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         self.assertTrue(level1['id_smsc'])  # Message.Id → SMSC id bound at accept
         self.assertFalse(level1['will_be_retried'])
         self.assertIsNone(level1['discard_reason'])
+        self.assertEqual(level1['connector'], self.c1.cid)
+        self.assertEqual(self.sent_connector, self.c1.cid)
 
         level2 = recs[2]
         self.assertEqual(level2['msgid'], msgId)
@@ -98,6 +101,11 @@ class DlrForwardQueueTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCas
         self.assertEqual(level2['sub'], '001')
         self.assertEqual(level2['dlvrd'], '001')
         self.assertEqual(level2['err'], '000')
+        self.assertEqual(level2['connector'], self.c1.cid)
+
+        receipt = self.AckServerResource.last_request.args
+        self.assertEqual(receipt[b'level'][0], b'2')
+        self.assertEqual(receipt[b'connector'][0], self.c1.cid.encode())
 
     @defer.inlineCallbacks
     def test_forwards_without_dlr_url(self):

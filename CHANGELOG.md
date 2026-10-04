@@ -10,6 +10,53 @@ on the fork mainline (newest first).
 
 ## Unreleased
 
+### 2026-10-04
+
+- **Added — SMPP client connectors are managed over the HTTP API.** `PUT /connectors/<cid>` adds or replaces a
+  connector (replacing keeps its submit queue) and starts it unless `"started": false`; `POST
+  /connectors/<cid>/start|stop` changes its state; `DELETE /connectors/<cid>` retires it, refused with `409
+  backlog_not_empty` while messages still wait for it. Every change is persisted to the configuration store. The
+  endpoint requires `Authorization: Bearer <[http-api] control_token>` (env `HTTP_API_CONTROL_TOKEN`) and refuses
+  every request while no token is set. Refusals carry a JSON `{"error","message"}` body and the
+  `Jasmin-Error-Code` header. `/status` now reads back each connector's settings, except the password, and
+  whether it is started.
+
+- **Added — connectors change without dropping work.** A `PUT /connectors/<cid>` that changes only per-submit
+  settings (throughput, receipt scope and expiry, priority, requeue delay, logging, source and destination address
+  types) applies them in place and the bind stays up; one that changes the host, port, login or bind type opens a new
+  session, and is refused with `409 connector_busy` while a submit the connector took from its queue is unsettled.
+  Stopping and retiring a connector are refused the same way, after the queue consumer is detached so a
+  submit taken during the check is caught too, and `/status` reports each connector's `messages_in_flight`,
+  counting the first submit a connector takes as well. `PUT /routes/mt` replaces the whole MT routing table in one synchronous step, and an
+  empty list clears it. `PUT /users/<username>` re-enables a disabled group and repairs a user's membership, and an
+  unchanged request still persists anything left unsaved.
+
+- **Added — the MT routes and the HTTP send user are managed over the HTTP API too.** `PUT /routes/mt`
+  `{"routes": [{"tag", "connectors"}, ...]}` makes one random round-robin route per tag over its connectors, so a
+  `/send` carrying that tag goes out only on them; there is no default route, so an untagged submit is refused. A
+  request naming an unknown connector is refused and leaves the table as it was.
+  `PUT /users/<username>` `{"password", "group"}` creates the user (and its group) once and leaves an existing,
+  matching user untouched. A `PUT /connectors/<cid>` that repeats the current settings no longer drops the bind.
+  Each change is persisted, and each endpoint takes the same bearer token as `/connectors`.
+
+- **Added — `/send` names the connector that accepted the submit.** A `Jasmin-Connector` header carries its id, and a
+  submit deduplicated by its `msgid` answers the connector the first one was accepted for.
+
+- **Added — receipts are correlated per receipt scope.** A connector's `dlr_scope` (jCli `dlr_scope`, the control
+  endpoint and `/status`) namespaces the map from an SMSC message id to the submit, so two SMPP accounts that issue
+  the same id cannot overwrite each other, while binds of one account share a scope and keep matching a receipt that
+  arrives on a sibling. An empty scope keeps the previous key.
+
+- **Fixed — outcomes name the connector that handled them.** A terminal receipt reported the SMSC message id in
+  its `connector` field, both on the HTTP receipt and on the forwarded outcome; it now reports the connector
+  that received the receipt. A discard outcome carried no connector; it now carries the one that discarded the
+  message.
+
+- **Fixed — stopping an already-stopped connector releases its consumer and queue.** `connector_stop` returned
+  before cancelling the submit queue consumer and before deleting the queue when the service was already
+  stopped, which is always the case when `connector_remove` calls it, so a removed connector left its consumer
+  attached.
+
 ### 2026-08-07
 
 - **Changed — a message needing more segments than the connector may send is refused, not shortened.** The

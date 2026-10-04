@@ -27,11 +27,12 @@ SMPPClientConfigKeyMap = {
     'submit_throughput': 'submit_sm_throughput', 'dlr_expiry': 'dlr_expiry', 'dlr_msgid': 'dlr_msg_id_bases',
     'con_fail_retry': 'reconnectOnConnectionFailure', 'dst_npi': 'dest_addr_npi',
     'trx_to': 'inactivityTimerSecs', 'ssl': 'useSSL', 'custom_tlvs': 'custom_tlvs',
-    'prio_max': 'priority_flag_max'}
+    'prio_max': 'priority_flag_max', 'dlr_scope': 'dlr_scope'}
 
 # Keys to be kept in string type, as requested in #64 and #105
 SMPPClientConfigStringKeys = [
-    'host', 'systemType', 'username', 'password', 'addressRange', 'useSSL', 'source_addr', 'custom_tlvs']
+    'host', 'systemType', 'username', 'password', 'addressRange', 'useSSL', 'source_addr', 'custom_tlvs',
+    'dlr_scope']
 
 # When updating a key from RequireRestartKeys, the connector need restart for update to take effect
 RequireRestartKeys = ['host', 'port', 'username', 'password', 'systemType']

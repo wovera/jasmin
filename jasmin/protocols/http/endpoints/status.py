@@ -40,8 +40,27 @@ class Status(Resource):
                     'learned_throughput': (listener.learned_rate.current if listener.learned_rate
                                            else config.submit_sm_throughput),
                     'messages_ready': depth['messages_ready'],
+                    'messages_in_flight': len(listener.in_flight),
                     'oldest_ready_age_seconds': depth['oldest_ready_age_seconds'],
                     'throttling_error_count': stats.get('throttling_error_count'),
+                    'config': {
+                        'host': config.host,
+                        'port': config.port,
+                        'username': config.username,
+                        'bind': config.bindOperation,
+                        'submit_sm_throughput': config.submit_sm_throughput,
+                        'dlr_expiry': config.dlr_expiry,
+                        'dlr_msg_id_bases': config.dlr_msg_id_bases,
+                        'dlr_scope': getattr(config, 'dlr_scope', ''),
+                        'priority_flag_max': config.priority_flag_max,
+                        'requeue_delay': config.requeue_delay,
+                        'log_privacy': config.log_privacy,
+                        'source_addr_ton': config.source_addr_ton.name,
+                        'source_addr_npi': config.source_addr_npi.name,
+                        'dest_addr_ton': config.dest_addr_ton.name,
+                        'dest_addr_npi': config.dest_addr_npi.name,
+                    },
+                    'started': connector['service'].running == 1,
                 })
             request.setResponseCode(200)
             request.write(json.dumps({'connectors': connectors}).encode())

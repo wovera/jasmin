@@ -61,6 +61,7 @@ class SMPPClientSMListener:
         self.submit_sm_q = None
         self.qos_last_submit_sm_at = None
         self.rejectTimers = {}
+        self.in_flight = set()
         self.submit_retrials = {}
         self.qosTimer = None
         self.last_dequeued_created_at = None
@@ -87,6 +88,7 @@ class SMPPClientSMListener:
     def setSubmitSmQ(self, queue):
         self.log.debug('Setting a new submit_sm_q: %s', queue)
         self.submit_sm_q = queue
+        self.in_flight.clear()
 
     def clearRejectTimer(self, msgid):
         if msgid in self.rejectTimers:
@@ -142,6 +144,7 @@ class SMPPClientSMListener:
 
     def rejectMessage(self, message, requeue=0):
         msgid = message.content.properties['message-id']
+        self.in_flight.discard(msgid)
         if not self.amqpBroker.connected:
             self.log.error("Cannot reject message, AMQP Broker is not connected !")
             return
@@ -155,6 +158,7 @@ class SMPPClientSMListener:
 
     def ackMessage(self, message):
         msgid = message.content.properties['message-id']
+        self.in_flight.discard(msgid)
         if not self.amqpBroker.connected:
             self.log.error("Cannot ack message, AMQP Broker is not connected !")
             return
@@ -170,7 +174,7 @@ class SMPPClientSMListener:
         if self.config.emit_discard_dlr:
             try:
                 yield self.amqpBroker.publish(exchange='messaging', routing_key='dlr.discard',
-                                              content=Discard(msgid, reason))
+                                              content=Discard(msgid, reason, self.SMPPClientFactory.config.id))
             except Exception as e:
                 self.log.error("Discard receipt for SubmitSmPDU[%s] not published (%s), message requeued: %s",
                                msgid, reason, e)
@@ -180,7 +184,9 @@ class SMPPClientSMListener:
 
     def _on_message(self, received):
         # Wrap pika's ReceivedMessage in the txamqp-style shim submit_sm_callback below expects.
-        return self.submit_sm_callback(DeliveryMessage(received))
+        message = DeliveryMessage(received)
+        self.in_flight.add(message.content.properties['message-id'])
+        return self.submit_sm_callback(message)
 
     def oldest_ready_age_seconds(self):
         if self.last_dequeued_created_at is None:
@@ -516,7 +522,8 @@ class SMPPClientSMListener:
                 if r.response.status == CommandStatus.ESME_ROK:
                     dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status,
                               smpp_msgid=r.response.params['message_id'],
-                              smpp_msgids=segment_smpp_msgids(r.request))
+                              smpp_msgids=segment_smpp_msgids(r.request),
+                              dlr_scope=getattr(self.SMPPClientFactory.config, 'dlr_scope', ''))
                 else:
                     dlr = DLR(pdu_type=r.response.id, msgid=msgid, status=r.response.status)
                 yield self.amqpBroker.publish(exchange='messaging', routing_key='dlr.submit_sm_resp', content=dlr)
@@ -891,7 +898,9 @@ class SMPPClientSMListener:
                                                           msgid=self.code_dlr_msgid(routable.pdu),
                                                           status=routable.pdu.dlr['stat'],
                                                           cid=self.SMPPClientFactory.config.id,
-                                                          dlr_details=routable.pdu.dlr))
+                                                          dlr_details=routable.pdu.dlr,
+                                                          dlr_scope=getattr(
+                                                              self.SMPPClientFactory.config, 'dlr_scope', '')))
         except (InterceptorRunError, DeliverSmInterceptionError) as e:
             # Do not log text for privacy reasons
             # Added in #691

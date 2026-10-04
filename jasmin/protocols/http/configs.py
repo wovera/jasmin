@@ -18,6 +18,8 @@ class HTTPApiConfig(ConfigFile):
 
         self.billing_feature = self._getbool('http-api', 'billing_feature', True)
 
+        self.control_token = self._get('http-api', 'control_token', '')
+
         # Logging
         self.access_log = self._get(
             'http-api', 'access_log', '%s/http-accesslog.log' % LOG_PATH)
