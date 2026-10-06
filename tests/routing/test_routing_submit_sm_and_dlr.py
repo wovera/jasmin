@@ -36,6 +36,16 @@ def waitFor(seconds):
     yield waitDeferred
 
 
+@defer.inlineCallbacks
+def waitUntil(condition, timeout=10):
+    """Returns as soon as condition holds, polling instead of sleeping for a guessed duration."""
+    for _ in range(int(timeout / 0.05)):
+        if condition():
+            return
+        yield waitFor(0.05)
+    raise AssertionError('Condition not reached within %ss' % timeout)
+
+
 class HttpParameterTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCaseTools):
     @defer.inlineCallbacks
     def test_validity_period(self):
@@ -208,6 +218,8 @@ class HttpParameterTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTestCaseT
         c = yield text_content(response)
         msgStatus = c[:7]
 
+        # The connector paces at 1/s, so the second part leaves a second after the first.
+        yield waitUntil(lambda: len(self.SMSCPort.factory.lastClient.submitRecords) == 2)
         yield self.stopSmppClientConnectors()
 
         # Run tests
@@ -833,14 +845,13 @@ class HttpDlrCallbackingTestCases(RouterPBProxy, HappySMSCTestCase, SubmitSmTest
         msgStatus = c[:7]
         msgId = c[9:45]
 
-        # Wait 1 seconds for 2 submit_sm_resps
-        yield waitFor(1)
+        # The level 1 receipt is thrown once the last part's submit_sm_resp is handled, the parts paced 1s apart
+        yield waitUntil(lambda: self.AckServerResource.render_GET.call_count == 1)
 
         # Trigger a deliver_sm
         yield self.SMSCPort.factory.lastClient.trigger_DLR()
 
-        # Wait 1 seconds for deliver_sm
-        yield waitFor(1)
+        yield waitUntil(lambda: self.AckServerResource.render_GET.call_count == 2)
 
         yield self.stopSmppClientConnectors()
 
@@ -957,8 +968,8 @@ class LongSmHttpDlrCallbackingTestCases(RouterPBProxy, HappySMSCTestCase, Submit
         msgStatus = c[:7]
         msgId = c[9:45]
 
-        # Wait 1 seconds for submit_sm_resp
-        yield waitFor(1)
+        # The receipt is thrown once the last part's submit_sm_resp is handled, the parts paced 1s apart
+        yield waitUntil(lambda: self.AckServerResource.render_POST.call_count == 1)
 
         yield self.stopSmppClientConnectors()
 
@@ -1205,8 +1216,8 @@ class SendtoNoResponseOnSubmitSMSCTestCases(RouterPBProxy, NoResponseOnSubmitSMS
     def test_submit_sm_with_no_submit_sm_resp(self):
         """Related to #247
 
-        Send sms to a NoResponseOnSubmitSMSC and check that sms was requeued on pdu request timeout
-        error.
+        Send sms to a NoResponseOnSubmitSMSC and check that a submit that timed out is never sent again: it may
+        have reached the SMSC, so it is discarded in doubt instead of being requeued.
         """
 
         yield self.connect('127.0.0.1', self.pbPort)
@@ -1236,7 +1247,7 @@ class SendtoNoResponseOnSubmitSMSCTestCases(RouterPBProxy, NoResponseOnSubmitSMS
 
         # Run tests
         self.assertEqual(msgStatus, 'Success')
-        self.assertEqual(2, len(self.SMSCPort.factory.lastClient.submitRecords))
+        self.assertEqual(1, len(self.SMSCPort.factory.lastClient.submitRecords))
 
 
 class SmppsDlrCallbacking(RouterPBProxy, SMPPClientTestCases, SubmitSmTestCaseTools):

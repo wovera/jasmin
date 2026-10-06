@@ -27,6 +27,10 @@ if [ -n "${DLR_FORWARD_QUEUE:-}" ]; then
   set_option dlr dlr_forward_queue "$DLR_FORWARD_QUEUE"
 fi
 
+if [ -n "${MO_FORWARD_QUEUE:-}" ]; then
+  set_option router mo_forward_queue "$MO_FORWARD_QUEUE"
+fi
+
 # Optional internal billing toggle (unset = Jasmin's built-in default of enabled)
 if [ -n "${BILLING_FEATURE:-}" ]; then
   set_option smpp-server billing_feature "$BILLING_FEATURE"

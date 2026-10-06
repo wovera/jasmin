@@ -14,7 +14,7 @@ from twisted.python.failure import Failure
 
 from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.tools.tlv import format_tlvs_for_log
-from jasmin.tools.jitter import jittered
+from jasmin.tools.jitter import backoff
 from smpp.twisted.protocol import DataHandlerResponse, SMPPSessionStates
 from smpp.twisted.server import SMPPBindManager as _SMPPBindManager
 from smpp.twisted.server import SMPPServerFactory as _SMPPServerFactory
@@ -48,6 +48,7 @@ class SMPPClientFactory(ClientFactory):
 
     def __init__(self, config, msgHandler=None):
         self.reconnectTimer = None
+        self.reconnectAttempts = 0
         self.smpp = None
         self.connectionRetry = True
         self.config = config
@@ -107,7 +108,8 @@ class SMPPClientFactory(ClientFactory):
         self.log.error("Connection failed. Reason: %s", str(reason))
 
         if self.config.reconnectOnConnectionFailure and self.connectionRetry:
-            delay = jittered(self.config.reconnectOnConnectionFailureDelay)
+            delay = backoff(self.config.reconnectOnConnectionFailureDelay, self.reconnectAttempts)
+            self.reconnectAttempts += 1
             self.log.info("Reconnecting after %.1f seconds ...", delay)
             self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:
@@ -121,7 +123,8 @@ class SMPPClientFactory(ClientFactory):
         self.log.error("Connection lost. Reason: %s", str(reason))
 
         if self.config.reconnectOnConnectionLoss and self.connectionRetry:
-            delay = jittered(self.config.reconnectOnConnectionLossDelay)
+            delay = backoff(self.config.reconnectOnConnectionLossDelay, self.reconnectAttempts)
+            self.reconnectAttempts += 1
             self.log.info("Reconnecting after %.1f seconds ...", delay)
             self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:

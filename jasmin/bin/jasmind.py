@@ -138,6 +138,7 @@ class JasminDaemon(BaseDaemon):
 
     def stopRouterPBService(self):
         """Stop Router PB server"""
+        self.components['router-pb-factory'].stopService()
         return self.components['router-pb-server'].stopListening()
 
     def startSMPPClientManagerPBService(self):

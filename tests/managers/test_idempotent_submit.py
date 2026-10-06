@@ -1,5 +1,7 @@
+from pika.exceptions import NackError
 from twisted.internet import defer
 
+from jasmin.protocols.http.errors import SubmitInDoubtError
 from jasmin.protocols.smpp.configs import SMPPClientConfig
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
 from jasmin.redis.client import ConnectionWithConfiguration
@@ -130,7 +132,7 @@ class IdempotentSubmitTestCases(SMPPClientPBProxyTestCase):
                         'claim ttl was %s' % ttl)
 
     @defer.inlineCallbacks
-    def test_publish_failure_releases_the_claim_so_a_retry_enqueues(self):
+    def test_publish_refused_by_the_broker_releases_the_claim_so_a_retry_enqueues(self):
         yield self.connect('127.0.0.1', self.pbPort)
         yield self.add(self.defaultConfig)
         yield waitFor(1)
@@ -138,15 +140,14 @@ class IdempotentSubmitTestCases(SMPPClientPBProxyTestCase):
         msgid = '44444444-4444-4444-4444-444444444444'
 
         basic_publish = self.clientManagerPB.submit_chan.basic_publish
-        self.clientManagerPB.submit_chan.basic_publish = lambda *a, **k: defer.fail(IOError('broker unavailable'))
+        self.clientManagerPB.submit_chan.basic_publish = lambda *a, **k: defer.fail(NackError([]))
         try:
-            yield self.submit_sm(cid, self.SubmitSmPDU, self.uid, msgid=msgid)
-        except Exception:
-            pass
+            refused = yield self.clientManagerPB.perspective_submit_sm(
+                uid=self.uid, cid=cid, SubmitSmPDU=self.SubmitSmPDU, submit_sm_bill=None, pickled=False,
+                msgid=msgid)
         finally:
             self.clientManagerPB.submit_chan.basic_publish = basic_publish
-        # The PB server logs the failure before returning it, and trial fails a test that leaves one logged.
-        self.flushLoggedErrors(IOError)
+        self.assertFalse(refused)
         yield waitFor(1)
 
         self.assertEqual((yield self.queued(cid)), 0)
@@ -159,6 +160,37 @@ class IdempotentSubmitTestCases(SMPPClientPBProxyTestCase):
         self.assertEqual(retried, msgid)
         self.assertEqual((yield self.queued(cid)), 1)
 
+
+    @defer.inlineCallbacks
+    def test_unconfirmed_publish_keeps_the_claim_so_a_retry_never_enqueues_twice(self):
+        yield self.connect('127.0.0.1', self.pbPort)
+        yield self.add(self.defaultConfig)
+        yield waitFor(1)
+        cid = self.defaultConfig.id
+        msgid = '99999999-9999-9999-9999-999999999999'
+        yield self.redisClient.delete('idem:%s' % msgid)
+        basic_publish = self.clientManagerPB.submit_chan.basic_publish
+
+        def publish_then_lose_the_confirm(*args, **kwargs):
+            # The broker takes the message, then the channel dies before its confirm comes back.
+            basic_publish(*args, **kwargs).addErrback(lambda _: None)
+            return defer.fail(IOError('channel closed before the confirm'))
+
+        self.clientManagerPB.submit_chan.basic_publish = publish_then_lose_the_confirm
+        try:
+            yield self.assertFailure(self.clientManagerPB.perspective_submit_sm(
+                uid=self.uid, cid=cid, SubmitSmPDU=self.SubmitSmPDU, submit_sm_bill=None, pickled=False,
+                msgid=msgid), SubmitInDoubtError)
+        finally:
+            self.clientManagerPB.submit_chan.basic_publish = basic_publish
+        yield waitFor(1)
+        self.assertEqual((yield self.queued(cid)), 1)
+        self.assertEqual((yield self.redisClient.get('idem:%s' % msgid)), cid)
+
+        retried = yield self.submit_sm(cid, self.SubmitSmPDU, self.uid, msgid=msgid)
+        yield waitFor(1)
+        self.assertEqual(retried, msgid)
+        self.assertEqual((yield self.queued(cid)), 1)
 
     @defer.inlineCallbacks
     def _submitRequestingAReceipt(self, cid, msgid):

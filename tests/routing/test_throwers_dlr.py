@@ -145,6 +145,11 @@ class HTTPDLRThrowerTestCase(DLRThrowerTestCases):
         """When receiving a 404 error, no further retries shall be made
         """
         self.Error404ServerResource.render_POST = Mock(wraps=self.Error404ServerResource.render_POST)
+        settled = defer.Deferred()
+        reject = self.DLRThrower.rejectMessage
+        self.DLRThrower.rejectMessage = Mock(
+            side_effect=lambda *args, **kwargs: settled.callback(None) or reject(*args, **kwargs))
+        self.DLRThrower.rejectAndRequeueMessage = Mock(wraps=self.DLRThrower.rejectAndRequeueMessage)
 
         dlr_url = 'http://127.0.0.1:%s/dlr' % self.Error404Server.getHost().port
         dlr_level = 1
@@ -152,9 +157,11 @@ class HTTPDLRThrowerTestCase(DLRThrowerTestCases):
         message_status = 'DELIVRD'
         self.publishDLRContentForHttpapi(message_status, msgid, dlr_url, dlr_level)
 
-        yield waitFor(1)
+        yield settled
 
         self.assertEqual(self.Error404ServerResource.render_POST.call_count, 1)
+        self.DLRThrower.rejectAndRequeueMessage.assert_not_called()
+        self.assertEqual(self.DLRThrower.rejectMessage.call_args.kwargs.get('requeue', 0), 0)
 
     @defer.inlineCallbacks
     def test_throwing_http_connector_dlr_level1(self):
@@ -386,3 +393,15 @@ class SMPPDLRThrowerTestCases(RouterPBProxy, SMPPClientTestCases, SubmitSmTestCa
         self.assertEqual(self.DLRThrower.ackMessage.call_count, 0)
         self.assertEqual(self.DLRThrower.rejectMessage.call_count, 1)
         self.assertEqual(self.DLRThrower.rejectAndRequeueMessage.call_count, 0)
+
+
+class ThrowerStateTestCase(TestCase):
+    def test_retrial_counts_are_not_shared_between_throwers(self):
+        message = Mock()
+        message.content.properties = {'message-id': 'shared-id'}
+        first, second = DLRThrower(DLRThrowerConfig()), DLRThrower(DLRThrowerConfig())
+
+        first.incThrowingRetrials(message)
+
+        self.assertEqual(first.getThrowingRetrials(message), 1)
+        self.assertEqual(second.getThrowingRetrials(message), 0)

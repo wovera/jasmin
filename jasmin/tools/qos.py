@@ -34,7 +34,7 @@ class LearnedRate:
         self._last_clean_at = None
 
     def throttled(self):
-        self.current = max(1.0, self.current / 2)
+        self.current = max(min(1.0, self.ceiling), self.current / 2)
         self._last_clean_at = None
 
     def clean(self, now):

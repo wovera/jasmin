@@ -58,7 +58,8 @@ class ConnectorControlTestCase(RouterPBProxy, HappySMSCTestCase):
     @defer.inlineCallbacks
     def drained(self, cid):
         for _ in range(50):
-            if SMPPClientStatsCollector().get(cid).get('submit_sm_count'):
+            if (SMPPClientStatsCollector().get(cid).get('submit_sm_count')
+                    and not self.clientManager_f.getConnector(cid)['sm_listener'].in_flight):
                 defer.returnValue(True)
             yield waitFor(0.2)
         defer.returnValue(False)

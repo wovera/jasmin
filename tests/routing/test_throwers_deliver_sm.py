@@ -166,15 +166,21 @@ class HTTPDeliverSmThrowingTestCases(deliverSmThrowerTestCase):
         """When receiving a 404 error, no further retries shall be made
         """
         self.Error404ServerResource.render_POST = Mock(wraps=self.Error404ServerResource.render_POST)
+        settled = defer.Deferred()
+        reject = self.deliverSmThrower.rejectMessage
+        self.deliverSmThrower.rejectMessage = Mock(
+            side_effect=lambda *args, **kwargs: settled.callback(None) or reject(*args, **kwargs))
+        self.deliverSmThrower.rejectAndRequeueMessage = Mock(wraps=self.deliverSmThrower.rejectAndRequeueMessage)
 
         routedConnector = HttpConnector('dst', 'http://127.0.0.1:%s/send' % self.Error404Server.getHost().port, 'POST')
 
         self.publishRoutedDeliverSmContent(self.routingKey, self.testDeliverSMPdu, '1', 'src', routedConnector)
 
-        # Wait 1 second
-        yield waitFor(1)
+        yield settled
 
         self.assertEqual(self.Error404ServerResource.render_POST.call_count, 1)
+        self.deliverSmThrower.rejectAndRequeueMessage.assert_not_called()
+        self.assertEqual(self.deliverSmThrower.rejectMessage.call_args.kwargs.get('requeue', 0), 0)
 
     @defer.inlineCallbacks
     def test_throwing_validity_parameter(self):

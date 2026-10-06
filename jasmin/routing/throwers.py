@@ -16,7 +16,6 @@ from treq import text_content
 from smpp.pdu.constants import priority_flag_name_map
 from smpp.pdu.pdu_encoding import DataCodingEncoder
 
-from jasmin.queues.content import Content
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.protocols.smpp.factory import SMPPServerFactory
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
@@ -59,11 +58,11 @@ class Thrower(Service):
     queueName = 'abstract_thrower'
     callback = None
     errback = None
-    requeueTimers = {}
-    throwing_retrials = {}
 
     def __init__(self, config):
         self.config = config
+        self.requeueTimers = {}
+        self.throwing_retrials = {}
         self.chan = None  # this thrower's own channel (per-consumer channel isolates delivery tags)
 
         # Check if callbacks are defined in child class ?
@@ -248,30 +247,6 @@ class deliverSmThrower(Thrower):
         Thrower.__init__(self, config)
 
     @defer.inlineCallbacks
-    def forward_mo(self, msgid, args):
-        def _text(v):
-            return v.decode(errors='replace') if isinstance(v, (bytes, bytearray)) else v
-
-        content = args.get('content')
-        coding = args.get('coding')
-        payload = {
-            'id': msgid,
-            'from': _text(args.get('from')),
-            'to': _text(args.get('to')),
-            'origin-connector': _text(args.get('origin-connector')),
-            # coding is a single data_coding byte; expose the integer.
-            'coding': coding[0] if isinstance(coding, (bytes, bytearray)) else coding,
-            'content': content if isinstance(content, str) else None,
-            'binary': _text(args.get('binary')),
-            'tlv_params': args.get('tlv_params'),
-            'custom_tlvs': args.get('custom_tlvs'),
-        }
-        forward = Content(
-            json.dumps(payload),
-            properties={'content-type': 'application/json', 'delivery-mode': 2})
-        yield self.amqpBroker.publish(exchange='', routing_key=self.config.mo_forward_queue, content=forward)
-
-    @defer.inlineCallbacks
     def http_deliver_sm_callback(self, message):
         msgid = message.content.properties['message-id']
         route_type = message.content.properties['headers']['route-type']
@@ -290,14 +265,12 @@ class deliverSmThrower(Thrower):
             yield self.rejectMessage(message)
             defer.returnValue(None)
 
-        # Build mandatory arguments
         args = {
             'id': msgid,
             'from': RoutedDeliverSmContent.params['source_addr'],
             'to': RoutedDeliverSmContent.params['destination_addr'],
             'origin-connector': message.content.properties['headers']['src-connector-id']}
 
-        # Content can be short_message or message_payload:
         if 'short_message' in RoutedDeliverSmContent.params and len(RoutedDeliverSmContent.params['short_message']) > 0:
             args['content'] = RoutedDeliverSmContent.params['short_message']
         elif 'message_payload' in RoutedDeliverSmContent.params:
@@ -309,13 +282,11 @@ class deliverSmThrower(Thrower):
             yield self.rejectMessage(message)
             defer.returnValue(None)
 
-        # Set the binary arg after deciding where to pick the content from
         if isinstance(args['content'], bytes):
             args['binary'] = binascii.hexlify(args['content'])
         else:
             args['binary'] = binascii.hexlify(args['content'].encode())
 
-        # Build optional arguments
         if ('priority_flag' in RoutedDeliverSmContent.params and
                     RoutedDeliverSmContent.params['priority_flag'] is not None):
             args['priority'] = priority_flag_name_map[RoutedDeliverSmContent.params['priority_flag'].name]
@@ -326,7 +297,6 @@ class deliverSmThrower(Thrower):
                     RoutedDeliverSmContent.params['validity_period'] is not None):
             args['validity'] = RoutedDeliverSmContent.params['validity_period']
 
-        # Build standard optional TLV params
         standard_optional_params = [
             'user_message_reference', 'source_port', 'destination_port',
             'sar_msg_ref_num', 'sar_total_segments', 'sar_segment_seqnum',
@@ -348,7 +318,6 @@ class deliverSmThrower(Thrower):
         if tlv_params:
             args['tlv_params'] = json.dumps(tlv_params)
 
-        # Forward custom TLVs (raw vendor-specific TLVs)
         custom_tlvs_list = getattr(RoutedDeliverSmContent, 'custom_tlvs', [])
         if custom_tlvs_list:
             custom_tlvs_data = []
@@ -361,12 +330,6 @@ class deliverSmThrower(Thrower):
                         'tag': tag, 'length': length, 'type': value_type, 'value': value})
             if custom_tlvs_data:
                 args['custom_tlvs'] = json.dumps(custom_tlvs_data)
-
-        # A configured forward queue makes this a JSON forwarder: publish the MO and ack, skipping the HTTP throw.
-        if self.config.mo_forward_queue:
-            yield self.forward_mo(msgid, args)
-            yield self.ackMessage(message)
-            defer.returnValue(None)
 
         counter = 0
         for dc in dcs:
@@ -423,17 +386,15 @@ class deliverSmThrower(Thrower):
                 self.log.error('Throwing message [msgid:%s] to (%s %s/%s)[cid:%s] (%s), %s: %s.',
                                msgid, route_type, counter, len(dcs), dc.cid, dc.baseurl, type(e), e)
 
-                # List of errors after which, no further retrying shall be made
-                noRetryErrors = ['404']
+                not_found = isinstance(e, HttpApiError) and e.code == 404
 
                 if route_type == 'simple':
                     # Requeue message for later retry
-                    if (str(e) not in noRetryErrors
-                        and self.getThrowingRetrials(message) <= self.config.max_retries):
+                    if not not_found and self.getThrowingRetrials(message) <= self.config.max_retries:
                         self.log.debug('Message try-count is %s [msgid:%s]: requeuing',
                                        self.getThrowingRetrials(message), msgid)
                         yield self.rejectAndRequeueMessage(message)
-                    elif str(e) in noRetryErrors:
+                    elif not_found:
                         self.log.warning('Message [msgid:%s] is no more processed after receiving "%s" error',
                                       msgid, str(e))
                         yield self.rejectMessage(message)
@@ -666,16 +627,14 @@ class DLRThrower(Thrower):
         except Exception as e:
             self.log.error('Throwing HTTP/DLR [msgid:%s] to (%s): %r.', msgid, baseurl, e)
 
-            # List of errors after which, no further retrying shall be made
-            noRetryErrors = ['404']
+            not_found = isinstance(e, HttpApiError) and e.code == 404
 
             # Requeue message for later retry
-            if (str(e) not in noRetryErrors
-                and self.getThrowingRetrials(message) <= self.config.max_retries):
+            if not not_found and self.getThrowingRetrials(message) <= self.config.max_retries:
                 self.log.debug('Message try-count is %s [msgid:%s]: requeuing',
                                self.getThrowingRetrials(message), msgid)
                 yield self.rejectAndRequeueMessage(message)
-            elif str(e) in noRetryErrors:
+            elif not_found:
                 self.log.warning('Message is no more processed after receiving "%s" error', str(e))
                 yield self.rejectMessage(message)
             else:

@@ -10,6 +10,7 @@ from twisted.trial.unittest import TestCase
 from jasmin.managers.clients import SMPPClientManagerPB
 from jasmin.managers.configs import SMPPClientPBConfig
 from jasmin.protocols.http.configs import HTTPApiConfig
+from jasmin.protocols.http.errors import SubmitInDoubtError
 from jasmin.protocols.http.endpoints import send as send_module
 from jasmin.protocols.http.server import HTTPApi
 from smpp.pdu import smpp_time
@@ -785,6 +786,18 @@ class ErrorCodeHeaderTestCases(HTTPApiTestCases):
     def _token(self, response):
         header = response.responseHeaders.getRawHeaders(b'jasmin-error-code')
         return None if header is None else header[0]
+
+    @defer.inlineCallbacks
+    def test_send_in_doubt_names_itself(self):
+        self.clientManager_f.perspective_submit_sm = Mock(return_value=defer.fail(SubmitInDoubtError()))
+
+        response = yield self.web.post(b'send', {b'username': 'nathalie',
+                                                 b'password': b'correct',
+                                                 b'to': b'06155423',
+                                                 b'content': 'anycontent'})
+
+        self.assertEqual(response.responseCode, 503)
+        self.assertEqual(self._token(response), b'submit_in_doubt')
 
     @defer.inlineCallbacks
     def test_rate_authentication_failure_names_itself(self):

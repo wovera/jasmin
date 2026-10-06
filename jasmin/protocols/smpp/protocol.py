@@ -107,7 +107,10 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
                 self.factory.stats.inc('submit_sm_count')
 
     def sendPDU(self, pdu):
-        twistedSMPPClientProtocol.sendPDU(self, pdu)
+        encoded = self.encoder.encode(pdu)
+        pdu.transmitted = True
+        self.transport.write(encoded)
+        self.onSMPPOperation()
 
         # Stats:
         self.factory.stats.set('last_sent_pdu_at', datetime.now())
@@ -129,6 +132,7 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
     def bindSucceeded(self, result, nextState):
         self.factory.stats.set('bound_at', datetime.now())
         self.factory.stats.inc('bound_count')
+        self.factory.reconnectAttempts = 0
 
         return twistedSMPPClientProtocol.bindSucceeded(self, result, nextState)
 
@@ -152,19 +156,19 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
         txn = self.closeOutboundTransaction(respPDU.seqNum)
 
         if txn is not None:
+            if isinstance(respPDU, GenericNack):
+                txn.ackDeferred.errback(SMPPGenericNackTransactionError(respPDU, txn.request))
+                return
+
             # Any status of a SubmitSMResp must be handled as a normal status
             if isinstance(txn.request, SubmitSM) or respPDU.status == CommandStatus.ESME_ROK:
                 if not isinstance(respPDU, txn.request.requireAck):
-                    txn.ackDeferred.errback(
-                        SMPPProtocolError, "Invalid PDU response type [%s] returned for request type [%s]" % (
-                            type(respPDU), type(txn.request)))
+                    txn.ackDeferred.errback(SMPPProtocolError(
+                        "Invalid PDU response type [%s] returned for request type [%s]" % (
+                            type(respPDU), type(txn.request)), respPDU.status))
                     return
                 # Do callback
                 txn.ackDeferred.callback(SMPPOutboundTxnResult(self, txn.request, respPDU))
-                return
-
-            if isinstance(respPDU, GenericNack):
-                txn.ackDeferred.errback(SMPPGenericNackTransactionError(respPDU, txn.request))
                 return
 
             txn.ackDeferred.errback(SMPPTransactionError(respPDU, txn.request))
@@ -256,12 +260,27 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
             # Do callback
             txn.ackDeferred.callback(SMPPOutboundTxnResult(self, txn.request, respPDU))
 
-    def endLongSubmitSmTransactionErr(self, failure):
-        # Return on generic NACK
-        try:
-            failure.raiseException()
-        except SMPPClientConnectionCorruptedError as _:
+    def sendLongSubmitSmSegment(self, pdu, timeout, txn, send_by):
+        msg_ref_num = pdu.LongSubmitSm['msg_ref_num']
+        pending = self.longSubmitSmTxns.get(msg_ref_num)
+        if pending is None or pending['txn'].ackDeferred is not txn:
             return
+        if self.connectionCorrupted or not self.isBound() or reactor.seconds() > send_by:
+            self.closeLongSubmitSmTransaction(msg_ref_num).ackDeferred.errback(LongSubmitSmTransactionError(
+                'Segment %s of msg_ref_num [%s] not sent: session no longer bound or deadline passed.' % (
+                    pdu.LongSubmitSm['segment_seqnum'], msg_ref_num)))
+            return
+        self.sendPDU(pdu)
+        self.startOutboundTransaction(pdu, timeout).addCallbacks(self.endLongSubmitSmTransaction,
+                                                                 self.endLongSubmitSmTransactionErr,
+                                                                 errbackArgs=(pending['txn'].request,))
+
+    def endLongSubmitSmTransactionErr(self, failure, head):
+        if failure.check(SMPPClientConnectionCorruptedError):
+            return
+        pending = self.longSubmitSmTxns.get(head.LongSubmitSm['msg_ref_num'])
+        if pending is not None and pending['txn'].request is head:
+            self.closeLongSubmitSmTransaction(head.LongSubmitSm['msg_ref_num']).ackDeferred.errback(failure)
 
     def preSubmitSm(self, pdu):
         """Will:
@@ -319,6 +338,9 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
             if splitMethod is not None and hasattr(pdu, 'nextPdu'):
                 partedSmPdu = pdu
                 first = True
+                interval = getattr(pdu, 'segment_interval', 0)
+                send_by = getattr(pdu, 'send_by', float('inf'))
+                delay = 0
 
                 # Iterate through parted PDUs
                 while True:
@@ -339,17 +361,23 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
                         partedSmPdu.LongSubmitSm['segment_seqnum'] = partedSmPdu.params['short_message'][5]
 
                     self.preSubmitSm(partedSmPdu)
-                    self.sendPDU(partedSmPdu)
-                    # Unlike parent protocol's sendPDU, we don't return per pdu
-                    # deferred, we'll return per transaction deferred instead
-                    self.startOutboundTransaction(
-                        partedSmPdu, timeout).addCallbacks(self.endLongSubmitSmTransaction,
-                                                           self.endLongSubmitSmTransactionErr)
+                    if delay:
+                        self.callLater(delay, self.sendLongSubmitSmSegment, partedSmPdu, timeout, txn, send_by)
+                    else:
+                        self.sendPDU(partedSmPdu)
+                        # Unlike parent protocol's sendPDU, we don't return per pdu
+                        # deferred, we'll return per transaction deferred instead
+                        self.startOutboundTransaction(
+                            partedSmPdu, timeout).addCallbacks(self.endLongSubmitSmTransaction,
+                                                               self.endLongSubmitSmTransactionErr,
+                                                               errbackArgs=(pdu,))
 
                     # Start a transaction using the first parted PDU
                     if first:
                         first = False
-                        txn = self.startLongSubmitSmTransaction(partedSmPdu, timeout)
+                        txn = self.startLongSubmitSmTransaction(
+                            partedSmPdu, timeout + interval * (partedSmPdu.LongSubmitSm['total_segments'] - 1))
+                    delay += interval
 
                     try:
                         # There still another PDU to go for

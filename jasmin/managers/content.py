@@ -52,7 +52,7 @@ class DLR(Content):
     """A DLR is published to dlr.* routes for DLRLookup"""
 
     def __init__(self, pdu_type, msgid, status, smpp_msgid=None, cid=None, dlr_details=None,
-                 smpp_msgids=None, dlr_scope=''):
+                 smpp_msgids=None, dlr_scope='', accepted_segments=None, discard_reason=None):
 
         if pdu_type not in (CommandId.deliver_sm, CommandId.data_sm, CommandId.submit_sm_resp):
             raise InvalidParameterError('Invalid pdu_type: %s' % pdu_type.name)
@@ -62,17 +62,22 @@ class DLR(Content):
         elif pdu_type in (CommandId.deliver_sm, CommandId.data_sm) and (cid is None or dlr_details is None):
             raise InvalidParameterError('deliver_sm dlr must have cid and dlr_details args defined')
 
-        properties = {'message-id': str(msgid), 'headers': {'type': pdu_type.name, 'dlr_scope': dlr_scope}}
+        properties = {'message-id': str(msgid), 'delivery-mode': 2,
+                      'headers': {'type': pdu_type.name, 'dlr_scope': dlr_scope}}
 
+        if accepted_segments is not None:
+            properties['headers']['accepted_segments'] = accepted_segments
+        if discard_reason is not None:
+            properties['headers']['discard_reason'] = discard_reason
         if pdu_type == CommandId.submit_sm_resp and smpp_msgid is not None:
             # smpp_msgid is used to define mapping between msgid and smpp_msgid (when receiving submit_sm_resp ESME_ROK)
             properties['headers']['smpp_msgid'] = smpp_msgid.decode().upper().lstrip('0')
-            if smpp_msgids:
-                # A long message is acknowledged segment by segment, each with its own id, and a receipt may
-                # quote any of them, so every segment must map back to this message and not only the last.
-                properties['headers']['smpp_msgids'] = ','.join(
-                    each.decode().upper().lstrip('0') for each in smpp_msgids)
-        elif pdu_type in (CommandId.deliver_sm, CommandId.data_sm):
+        if pdu_type == CommandId.submit_sm_resp and smpp_msgids:
+            # A long message is acknowledged segment by segment, each with its own id, and a receipt may
+            # quote any of them, so every accepted segment must map back to this message and not only the last.
+            properties['headers']['smpp_msgids'] = ','.join(
+                each.decode().upper().lstrip('0') for each in smpp_msgids)
+        if pdu_type in (CommandId.deliver_sm, CommandId.data_sm):
             properties['headers']['cid'] = cid
             for k, v in dlr_details.items():
                 if isinstance(v, bytes):
@@ -85,16 +90,21 @@ class DLR(Content):
         Content.__init__(self, status, properties=properties)
 
 
+# The submit may have reached the SMSC without a definite answer coming back, so it must never be sent again.
+IN_DOUBT = 'in_doubt'
+
+
 class Discard(Content):
     """Published to dlr.discard when a queued submit is dropped before any SMSC answered it."""
 
-    REASONS = ('expired', 'smppc_not_ready', 'tlv', 'exception', 'revoked')
+    REASONS = ('expired', 'smppc_not_ready', 'tlv', 'exception', 'revoked', IN_DOUBT)
 
     def __init__(self, msgid, reason, connector=''):
         if reason not in self.REASONS:
             raise InvalidParameterError('Invalid discard reason: %s' % reason)
         Content.__init__(self, reason, properties={
             'message-id': str(msgid),
+            'delivery-mode': 2,
             'headers': {'type': 'discard', 'discard_reason': reason, 'connector': connector}})
 
 
@@ -205,10 +215,13 @@ class DeliverSmContent(PDU):
     """A SMPP DeliverSm Content"""
 
     def __init__(self, body, sourceCid, pickleProtocol=pickle.HIGHEST_PROTOCOL, prePickle=True,
-                 concatenated=False, will_be_concatenated=False):
+                 concatenated=False, will_be_concatenated=False, msgid=None):
         props = {}
 
-        props['message-id'] = randomUniqueId('deliver_sm', None, sourceCid, None)
+        if msgid is None:
+            msgid = randomUniqueId('deliver_sm', None, sourceCid, None)
+        props['message-id'] = msgid
+        props['delivery-mode'] = 2
 
         # For routing purpose, connector-id indicates the source connector of the PDU
         props['headers'] = {'try-count': 0,

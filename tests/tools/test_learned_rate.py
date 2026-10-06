@@ -13,6 +13,11 @@ class LearnedRateTestCase(TestCase):
             rate.throttled()
         self.assertEqual(rate.current, 1)
 
+    def test_a_sub_one_ceiling_is_never_exceeded_on_throttle(self):
+        rate = LearnedRate(ceiling=0.5)
+        rate.throttled()
+        self.assertEqual(rate.current, 0.5)
+
     def test_recovers_one_per_clean_second_up_to_the_ceiling(self):
         rate = LearnedRate(ceiling=10)
         rate.throttled()

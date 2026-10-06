@@ -30,7 +30,9 @@ class ExpiredSubmitDiscardTestCase(TestCase):
         broker = Mock()
         broker.connected = True
 
-        listener = SMPPClientSMListener(SMPPClientSMListenerConfig(), client_factory, broker, Mock())
+        redis = Mock()
+        redis.get = Mock(return_value=defer.succeed(None))
+        listener = SMPPClientSMListener(SMPPClientSMListenerConfig(), client_factory, broker, redis)
         listener.submit_sm_q = Mock()
         listener.submit_sm_q.get.return_value = defer.Deferred()
         # Stubbed because the real one arms a reactor timer; the test asserts which disposition was chosen.

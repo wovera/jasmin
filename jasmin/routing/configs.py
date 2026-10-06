@@ -17,6 +17,9 @@ class RouterPBConfig(ConfigFile):
     def __init__(self, config_file=None):
         ConfigFile.__init__(self, config_file)
 
+        self.mo_forward_queue = self._get('router', 'mo_forward_queue', '')
+        self.mo_forward_retry_delay = self._getint('router', 'mo_forward_retry_delay', 30)
+
         self.store_path = self._get('router', 'store_path', '%s' % STORE_PATH)
 
         self.persistence_timer_secs = self._getint('router', 'persistence_timer_secs', 60)
@@ -49,8 +52,6 @@ class deliverSmThrowerConfig(ConfigFile):
         self.timeout = self._getint('deliversm-thrower', 'http_timeout', 30)
         self.retry_delay = self._getint('deliversm-thrower', 'retry_delay', 30)
         self.max_retries = self._getint('deliversm-thrower', 'max_retries', 3)
-
-        self.mo_forward_queue = self._get('deliversm-thrower', 'mo_forward_queue', '')
 
         # Logging
         self.log_level = logging.getLevelName(self._get('deliversm-thrower', 'log_level', 'INFO'))

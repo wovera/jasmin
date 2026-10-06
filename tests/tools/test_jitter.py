@@ -1,6 +1,6 @@
 from twisted.trial import unittest
 
-from jasmin.tools.jitter import jittered
+from jasmin.tools.jitter import backoff, jittered
 
 
 class JitteredTestCase(unittest.TestCase):
@@ -27,3 +27,23 @@ class JitteredTestCase(unittest.TestCase):
 
     def test_zero_factor_is_unchanged(self):
         self.assertEqual(jittered(10, 0), 10)
+
+
+class BackoffTestCase(unittest.TestCase):
+    def test_doubles_from_the_base_delay(self):
+        for attempt, expected in enumerate((10, 20, 40, 80, 160)):
+            value = backoff(10, attempt)
+            self.assertTrue(expected * 0.75 <= value <= expected * 1.25, (attempt, value))
+
+    def test_never_waits_longer_than_the_ceiling(self):
+        for attempt in (6, 20, 10 ** 6):
+            self.assertLessEqual(backoff(10, attempt, ceiling=300), 300 * 1.25)
+
+    def test_a_base_above_the_ceiling_is_kept(self):
+        value = backoff(600, 3, ceiling=300)
+        self.assertTrue(450 <= value <= 750, value)
+
+    def test_a_zero_base_still_backs_off(self):
+        for attempt, expected in enumerate((1, 2, 4)):
+            value = backoff(0, attempt)
+            self.assertTrue(expected * 0.75 <= value <= expected * 1.25, (attempt, value))

@@ -7,8 +7,10 @@ from logging.handlers import TimedRotatingFileHandler
 
 from twisted.internet import defer
 from twisted.spread import pb
+from pika.exceptions import NackError, UnroutableError
 
 import jasmin
+from jasmin.protocols.http.errors import SubmitInDoubtError
 from jasmin.protocols.smpp.protocol import SMPPServerProtocol
 from jasmin.protocols.smpp.services import SMPPClientService
 from jasmin.tools.migrations.configuration import ConfigurationMigrator
@@ -16,7 +18,7 @@ from smpp.pdu.pdu_types import RegisteredDeliveryReceipt
 from smpp.twisted.protocol import SMPPSessionStates
 from .configs import SMPPClientSMListenerConfig
 from .content import SubmitSmContent
-from .listeners import SMPPClientSMListener
+from .listeners import SMPPClientSMListener, IDEMPOTENCY_KEY
 
 LOG_CATEGORY = "jasmin-pb-client-mgmt"
 
@@ -41,6 +43,7 @@ class SMPPClientManagerPB(pb.Avatar):
         self.pickleProtocol = pickle.HIGHEST_PROTOCOL
         self.status_chan = None
         self.submit_chan = None
+        self.submitLock = defer.DeferredLock()
 
         # Persistence flag, accessed through perspective_is_persisted
         self.persisted = True
@@ -662,7 +665,7 @@ class SMPPClientManagerPB(pb.Avatar):
                 # fail closed: without the dedup store a caller retry could double-submit to the wire
                 self.log.error('Idempotent submit [msgid:%s] refused: Redis not connected', msgid)
                 defer.returnValue(False)
-            idem_key = "idem:%s" % msgid
+            idem_key = IDEMPOTENCY_KEY % msgid
             claimed = yield self.redisClient.set(
                 idem_key, cid, expire=connector['config'].dlr_expiry, only_if_not_exists=True)
             if not claimed:
@@ -743,15 +746,29 @@ class SMPPClientManagerPB(pb.Avatar):
                     yield self.redisClient.hmset(hashKey, hashValues)
                     yield self.redisClient.expire(hashKey, source_connector.factory.config.dlr_expiry)
 
+            yield self.submitLock.acquire()
             try:
-                yield self.submit_chan.basic_publish(
-                    exchange='messaging', routing_key=pubQueueName,
-                    body=c.pika_body, properties=c.pika_properties, mandatory=True)
-            except Exception as e:
-                self.log.error('Submit publish [msgid:%s] not confirmed: %s', msgid, e)
-                publish_not_confirmed = True
-                raise
+                if self.submit_chan is None or self.submit_chan.is_closed:
+                    self.log.error('Submit publish [msgid:%s] not attempted: submit channel closed', msgid)
+                    publish_not_confirmed = True
+                    raise IOError('Submit channel closed')
+                try:
+                    yield self.amqpBroker.withinDeadline(self.submit_chan.basic_publish(
+                        exchange='messaging', routing_key=pubQueueName,
+                        body=c.pika_body, properties=c.pika_properties, mandatory=True))
+                except (NackError, UnroutableError) as e:
+                    self.log.error('Submit publish [msgid:%s] refused by the broker: %s', msgid, e)
+                    publish_not_confirmed = True
+                    raise
+                except Exception as e:
+                    # The claim stays: a retry must replay this submit's outcome rather than queue it a second time.
+                    self.log.error('Submit publish [msgid:%s] not confirmed, outcome unknown: %s', msgid, e)
+                    raise SubmitInDoubtError() from e
+            finally:
+                self.submitLock.release()
             connector['sm_listener'].last_ready_count += 1
+        except SubmitInDoubtError:
+            raise
         except Exception:
             # Release the claim on ANY post-claim failure, not only a failed publish: left held, the caller's
             # retry is answered "already accepted" for a message that never reached the queue.

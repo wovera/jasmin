@@ -12,6 +12,7 @@ from jasmin.protocols.http.errors import (
     LongContentExceededError,
     RouteNotFoundError,
     ServerError,
+    SubmitInDoubtError,
     SubmitNotConfirmedError,
     ThroughputExceededError,
     UrlArgsValidationError,
@@ -30,6 +31,7 @@ class ErrorTokenTestCase(TestCase):
         CredentialValidationError: 'invalid_credentials',
         ServerError: 'server_error',
         SubmitNotConfirmedError: 'submit_not_confirmed',
+        SubmitInDoubtError: 'submit_in_doubt',
         AuthenticationError: 'authentication_failed',
         RouteNotFoundError: 'route_not_found',
         ConnectorNotFoundError: 'connector_not_found',
@@ -56,6 +58,12 @@ class ErrorTokenTestCase(TestCase):
         for errorClass in overloaded:
             self.assertEqual(errorClass().code, 403, errorClass.__name__)
         self.assertEqual(len({errorClass.token for errorClass in overloaded}), len(overloaded))
+
+    def test_the_errors_sharing_status_503_stay_distinguishable(self):
+        # The stakes: a refused publish is safe to resend, an unconfirmed one may already be queued.
+        self.assertEqual(SubmitNotConfirmedError().code, 503)
+        self.assertEqual(SubmitInDoubtError().code, 503)
+        self.assertNotEqual(SubmitNotConfirmedError.token, SubmitInDoubtError.token)
 
     def test_every_error_declares_its_own_token(self):
         # Discovered, not listed: a subclass added later that forgets a token inherits the base placeholder and

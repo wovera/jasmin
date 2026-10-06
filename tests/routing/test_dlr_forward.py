@@ -239,7 +239,7 @@ class DlrForwardQueueDeclarationTestCases(RouterPBProxy, HappySMSCTestCase, Subm
     @defer.inlineCallbacks
     def tearDown(self):
         yield self.amqpBroker.chan.queue_delete(queue=self.declared_queue)
-        yield self.amqpBroker.chan.queue_delete(queue='DLRLookup-%s' % self.probe_pid)
+        yield self.amqpBroker.chan.queue_delete(queue='DLRLookup-%s.durable' % self.probe_pid)
         yield HappySMSCTestCase.tearDown(self)
 
     @defer.inlineCallbacks

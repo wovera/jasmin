@@ -10,7 +10,170 @@ on the fork mainline (newest first).
 
 ## Unreleased
 
+### 2026-10-05
+
+- **Fixed — a submit that reached the wire is not sent again while its claim lives.** Immediately before a
+  `submit_sm` leaves, the listener takes a Redis claim `wire:<msgid>` (SET NX). Every submit has a deadline - its
+  validity, else the connector's `dlr_expiry` after it was queued - and is not sent past it; the claim lives until
+  `dlr_expiry` after that deadline. A delivery whose claim is already held - an AMQP redelivery after a channel or
+  process loss - is settled before any expiry, readiness, TLV or revocation check: it replays the recorded outcome
+  of an answered submit, else it is discarded with the new `dlr.discard` reason `in_doubt`. Any failure after the
+  request was encoded and written to the SMPP session (response timeout, failed long transaction, an unbind
+  cancelling the transaction) is discarded `in_doubt` instead of being requeued; only a `generic_nack` answering
+  the request or a failure before transmission keeps the `exception` reason. A submit whose segments cannot all
+  leave before its deadline, measured once the claim is taken, releases the claim and is discarded `expired`
+  unsent; the send deadline is derived from that same measurement. The claim is released only when
+  every part of the submit was refused with a retryable status, and the message is requeued only once that
+  release succeeded; while Redis refuses it the release is retried every `requeue_delay`. If the claim cannot be
+  read or taken the submit is held back and requeued. A listener
+  without a Redis client therefore sends nothing: every submit is held back the same way. The guarantee rests on
+  Redis keeping the claim; a Redis that loses its data loses it. An `in_doubt` discard keeps the message's
+  receipt map, so a late acknowledgement and its receipts still resolve.
+- **Fixed — a long message is judged across all its segments.** Once any segment is accepted the message is never
+  requeued whole. Accepted in every segment, it settles `ESME_ROK` and maps receipts for each segment. Accepted
+  only in part, it settles with its first refused segment's status, the new `accepted_segments` count (header on
+  `dlr.submit_sm_resp`, field in the forwarded outcome) and the accepted segments' SMSC ids (`smpp_msgids`
+  header), which are mapped so their receipts resolve; its dlr map is then kept until it expires. Billing charges
+  accepted segments only. Only a message refused in every segment is retried. On a paced connector the segments
+  leave one interval of the learned rate apart instead of back to back, the long transaction's deadline grows by
+  the pacing, a message whose last segment would leave after its deadline is discarded `expired` unsent, and a
+  segment due after the bind dropped or after the deadline fails the message `in_doubt` without being sent. A
+  segment answered `generic_nack` or timing out fails the long transaction at once, so no later segment leaves
+  for it. A long message that fails after any segment was accepted is never resent: it settles as a
+  `dlr.submit_sm_resp` with body `DISCARDED`, `discard_reason: in_doubt`, the accepted count in
+  `accepted_segments` and the accepted SMSC ids in `smpp_msgids`, which are mapped so their receipts resolve;
+  the forwarded outcome carries `command_status: DISCARDED`, `discard_reason: in_doubt` and `accepted_segments`.
+- **Changed — an unconfirmed `/send` publish keeps its `msgid` claim.** A publish the broker neither confirmed nor
+  refused answers `503` with `Jasmin-Error-Code: submit_in_doubt` and keeps `idem:<msgid>`, so a retry replays
+  the first outcome instead of queueing the message twice. A publish the broker refused (`Nack`, unroutable) or
+  never attempted on a closed channel still releases the claim and answers `503 submit_not_confirmed`.
+- **Fixed — an unroutable `/send` publish is never reported confirmed.** The submit channel publishes one submit at
+  a time through its confirmation, as `publish_confirmed` does: pika matches a `basic.return` to no particular
+  publication, so a return and a combined `Ack` could confirm the unroutable submit and fail a routed one.
+- **Fixed — a `smppc_not_ready` discard releases the `msgid` claim** once its receipt is confirmed (or parked),
+  so the caller's later retry is submitted rather than answered with the acceptance of a message never sent, and
+  an unconfirmed discard retried later cannot release a claim the caller has since taken again. If the claim
+  cannot be released the message is requeued and its discard published again; a retry arriving before the
+  release succeeds is still answered with the original acceptance.
+- **Fixed — an accepted submit is acked only once its receipt is confirmed.** The `dlr.submit_sm_resp` receipt is
+  published on a confirm channel before the submit is acked, and recorded in `outcome:<msgid>` (expiring with the
+  wire claim) and in the listener's memory, so a redelivery to the same process replays it even when Redis did
+  not take the record, and a redelivery to the same process replays it even after the claim expired. An
+  unconfirmed receipt requeues the submit with a doubling delay from at least one second, capped at 300 seconds;
+  its redelivery replays the receipt instead of sending the SMS. After five unconfirmed publications the receipt
+  is published to the durable `dlr.submit_sm_resp.parked` queue and the submit is acked once that is confirmed;
+  a receipt that cannot be parked either keeps being retried. A billing request is
+  published once per answer, unconfirmed as upstream, and never replayed: the router's charge is not idempotent,
+  so a lost request under-charges rather than a replay charging twice.
+- **Changed — forwarded outcomes are published mandatory.** With `[dlr] dlr_forward_queue` set, the listener
+  publishes submit receipts, discards and delivery receipts mandatory, so one no DLR lookup (embedded with
+  `--enable-dlr-lookup`, or the standalone `dlrlookupd`) is bound to receive is retried, then parked. With it
+  unset they are confirmed but not mandatory, so a deployment without a DLR lookup drops them as upstream.
+- **Fixed — an acknowledged MO survives a broker restart.** The listener publishes inbound messages on a confirm
+  channel, mandatory, and answers the carrier `ESME_ROK` only after confirmation; an unavailable broker fails the
+  publish, so the carrier resends. MO envelopes are persistent and the router's queue and the DLR lookup's queue
+  are durable under new names, `RouterPB_deliver_sm_all.durable` and `DLRLookup-<pid>.durable`; the legacy
+  non-durable queues are no longer used. One-time deploy step: delete the legacy queues `RouterPB_deliver_sm_all`
+  and `DLRLookup-<pid>` if they exist. Receipt and discard envelopes are persistent. Identical MOs are all
+  forwarded: SMPP 3.4 gives an MO no identifier, so no content-based duplicate check is made. Not covered: a part
+  of a long MO is acknowledged once stored in Redis, so the incomplete message lives only in its 300-second Redis
+  hash, which a Redis restart or that expiry loses; without a Redis client a part is answered `ESME_RX_T_APPN`
+  so the carrier resends it; and with no
+  `[router] mo_forward_queue` the router's native MO routing acknowledges an MO before its unconfirmed downstream
+  publication, as upstream.
+- **Fixed — long MO assembly survives a crash and a reused reference.** Each part is stored with its content
+  digest and the 300-second expiry in one Redis script; a part whose slot already holds different content, or
+  whose total count, split method or data coding differs from the parts already stored, is answered
+  `ESME_RX_T_APPN` instead of being stored, and a retransmitted identical part restores a missing expiry. A
+  reused reference whose new message matches the stored one in all of these and in a stored part's content can
+  still be assembled with the old parts. An assembler takes a 30-second lease on the stored parts and publishes
+  under an assembled-message id kept in the parts hash, so a lease abandoned by a crashed process is taken over
+  under the same id. Once it holds the publisher the assembler renews its lease and the parts' 300-second expiry
+  and publishes only if the lease is still its own. The part completing a message is handed to the router before
+  assembly starts, so nothing that can fail runs after a confirmed assembly, which deletes the parts; the next
+  message reusing the reference assembles afresh. A part arriving while
+  another assembler holds a live lease waits, checking once a second for up to the 30-second lease, and is
+  answered `ESME_ROK` once that assembly is retired or after it has taken over a lapsed lease and assembled
+  itself; still held after that, it is answered `ESME_RX_T_APPN` so the carrier resends it. Answering it
+  `ESME_RX_T_APPN` at once let the carrier's resends rebuild and assemble the same message a second time.
+- **Changed — one confirmed publisher per AMQP connection.** `AmqpFactory.publish_confirmed` publishes on a single
+  confirm-mode channel, one publication at a time through its confirmation (pika matches a `basic.return` to no
+  particular publication), reopened and put back in confirm mode once the broker has closed it, and closed when
+  its confirm mode cannot be set. Opening that channel or confirming a publication, and confirming a `/send`
+  submit, is bounded by 15 seconds; past it the publication fails with `TimeoutError` and the AMQP connection is
+  aborted rather than closed gracefully, since a graceful close waits on the broker that stopped answering. The
+  reconnect opens a fresh channel; the broker may still have taken the abandoned publication, which its caller
+  then publishes again, and a `/send` submit stays `submit_in_doubt` with its `msgid` claim kept. A connection the
+  broker blocks for 15 seconds is closed. MO ingress, submit receipts, discards,
+  outcome forwards, parking and the router's MO forward all use it.
+- **Fixed — receipt lookups are bounded.** The DLR lookup consumer takes at most 64 unsettled receipts. An
+  unconfirmed outcome forward is retried with a doubling delay capped at 300 seconds and, after 10 failed
+  forwards of that receipt (counted per routing key, `dlr_scope`, message-id and status), published to the
+  durable `<dlr_forward_queue>.parked` queue; a receipt that cannot be parked either keeps being retried. A
+  receipt whose Redis lookup fails `dlr_lookup_max_retries` times is published whole and persistent to the
+  durable `<routing key>.parked` queue (`dlr.deliver_sm.parked`, `dlr.submit_sm_resp.parked`) and acked once
+  that is confirmed, instead of being rejected. The
+  SMSC-id mapping is installed before the outcome is forwarded, and the outcome before any HTTP receipt is
+  thrown. A terminal receipt for an HTTP-submitted message no longer deletes its dlr map: it expires with
+  `dlr_expiry`, so an acceptance still being forwarded and the other segments' receipts resolve. A discard no
+  longer deletes the message's dlr map either, so an old discard cannot remove the map of a retry under the same
+  `msgid`; it expires with `dlr_expiry`. Any failure escaping a receipt callback requeues the delivery. Two deliveries sharing a message-id each settle on
+  their own timer.
+- **Fixed — a configured MO forward is bounded.** An unconfirmed forward to `[router] mo_forward_queue` is retried
+  with a doubling delay from `mo_forward_retry_delay`, capped at 300 seconds, and after 10 failed forwards of that
+  MO published to the durable `<mo_forward_queue>.parked` queue; an MO that cannot be parked either keeps being
+  retried. A `short_message` an interceptor set as text is forwarded as its UTF-8 bytes instead of being rejected.
+- **Fixed — reconnects back off.** SMPP client and AMQP reconnects double their configured delay (at least one
+  second) per consecutive failure up to 300 seconds, and restart from the configured delay after a successful bind or connection.
+- **Fixed — a control channel closed by the broker is reopened** while its connection stays up, instead of failing
+  every later publish and declaration until the connection drops. A discard whose receipt is not confirmed is
+  requeued with a doubling delay capped at 300 seconds; after five attempts it is published to the durable
+  `dlr.discard.parked` queue, and the submit is removed only once that is confirmed.
+- **Fixed — pacing stays under the connector's ceiling.** A carrier throttle no longer lifts a learned rate below
+  one message per second up to one, and switching a connector's throughput off forgets its learned rate, so a
+  throttled retry takes the configured delay.
+- **Fixed — a submit body that cannot be read no longer stops its connector's consumer.** The consumer is re-armed
+  before the body is unpickled.
+- **Fixed — a `generic_nack` or mismatched response to a `submit_sm` fails its transaction** with
+  `SMPPGenericNackTransactionError` or `SMPPProtocolError` instead of raising `TypeError` in the PDU handler.
+- **Fixed — HTTP throwers keep retry state per thrower and stop on `404`.** Retry counters and timers are no longer
+  shared class attributes, and a `404` answer is matched by its status code, so it is not retried.
+- **Fixed — a settled submit leaves no retry tracking behind.** The listener forgets a submit's retry count when
+  it acks it or rejects it without requeue, including an outcome replayed by a redelivery.
+- **Delivery semantics — outcomes and forwards are at-least-once.** A confirmed outcome is struck from the replay
+  record only after its confirmation, and a forward is acked only after its confirmation, so a crash or a lost
+  record or ack between the two publishes it again. Consumers must deduplicate.
+- **Upstream compatibility.** Redis is mandatory for every outbound submit: a listener without it holds every
+  submit back. The MO forward is configured under `[router] mo_forward_queue` and `mo_forward_retry_delay`, and
+  its JSON payload carries only `id`, `from`, `to`, `origin-connector`, `coding` and `binary`. The router and DLR
+  lookup consume the renamed durable queues `RouterPB_deliver_sm_all.durable` and `DLRLookup-<pid>.durable`.
+  Every confirmed publication of a process (MO ingress, receipts, discards, forwards, parking) goes through one
+  publisher one at a time, so its throughput is one publication per broker round trip, and waiting publications
+  queue on its lock without bound.
+- **Known limits.** These hold only in modes Wovera does not run. With internal billing on, a billing request is
+  published unconfirmed after the submit is acked, so a crash or failed publication between them loses the
+  charge. With no `[router] mo_forward_queue`, native MO routing acks an MO before its unconfirmed downstream
+  publication, so a connection loss between them loses it. Long-MO assembly strips the whole UDH and clears UDHI,
+  so port-addressing information elements beside the concatenation one are not forwarded.
+
 ### 2026-10-04
+
+- **Changed — configured MO forwards need no MO route.** The router forwards every whole inbound message to
+  `[router] mo_forward_queue` directly, without a destination connector. The queue is declared durably;
+  JSON messages are persistent and published on a dedicated confirm-enabled channel with mandatory routing.
+  JSON carries only `id`, `from`, `to`, `origin-connector`, integer `coding` and the full message bytes as hex
+  `binary`. The inbound delivery is acked only after confirmation; channel and publish failures are requeued
+  after `[router] mo_forward_retry_delay` (default 30 seconds). Invalid payloads are logged and rejected without
+  requeue. Pending retry timers are cancelled when the router stops. A closed publisher channel is reopened
+  and re-confirmed through shared recovery. Enabled forwarding limits consumer prefetch to eight deliveries.
+  Empty keeps upstream routing.
+  The container exposes `MO_FORWARD_QUEUE`.
+- **Fixed — multipart MO reassembly accepts the last part first.** Assembly runs when all parts are present,
+  regardless of arrival order, with an atomic Redis claim preventing concurrent part callbacks from forwarding
+  the same assembled message twice. The sender-qualified hash key and its expiry are retained. Failed assembly
+  releases its claim for a duplicate-part retry. Missing content is logged and dropped with its claim released.
+  Both UDH reference widths are supported, and each part's full header is stripped. Malformed or empty UDH and
+  invalid concatenation counts or sequence numbers pass through as single messages.
 
 - **Added — SMPP client connectors are managed over the HTTP API.** `PUT /connectors/<cid>` adds or replaces a
   connector (replacing keeps its submit queue) and starts it unless `"started": false`; `POST

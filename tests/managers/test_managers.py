@@ -27,6 +27,7 @@ from tests.protocols.smpp.smsc_simulator import HappySMSC, HappySMSCRecorder, De
 from jasmin.queues.configs import AmqpConfig
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.queues.factory import AmqpFactory
+from jasmin.redis.client import SimpleConnection
 from jasmin.routing.Bills import SubmitSmBill
 from jasmin.routing.Routables import RoutableDeliverSm
 from jasmin.routing.configs import RouterPBConfig
@@ -65,11 +66,18 @@ class SMPPClientPBTestCase(TestCase):
         # Wait for AMQP Broker connection to get ready
         yield self.amqpBroker.getChannelReadyDeferred()
 
+        # Stands in for the DLR lookup a deployment always runs: an answered submit is acked once its outcome is taken.
+        yield self.amqpBroker.chan.exchange_declare(exchange='messaging', exchange_type='topic')
+        yield self.amqpBroker.named_queue_declare(queue='test-dlr-lookup')
+        yield self.amqpBroker.chan.queue_bind(queue='test-dlr-lookup', exchange='messaging', routing_key='dlr.*')
+
         # Launch the client manager server
         pbRoot = SMPPClientManagerPB(self.SMPPClientPBConfigInstance)
         self.clientManagerPB = pbRoot
 
         yield pbRoot.addAmqpBroker(self.amqpBroker)
+        self.wireRedis = yield SimpleConnection(reconnect=False)
+        pbRoot.addRedisClient(self.wireRedis)
         p = portal.Portal(JasminPBRealm(pbRoot))
         if not authentication:
             p.registerChecker(AllowAnonymousAccess())
@@ -101,6 +109,7 @@ class SMPPClientPBTestCase(TestCase):
         for q in self.amqpBroker.queues:
             yield self.amqpBroker.chan.queue_delete(queue=q)
         yield self.amqpClient.disconnect()
+        yield self.wireRedis.disconnect()
 
 
 class SMPPClientPBProxyTestCase(SMPPClientManagerPBProxy, SMPPClientPBTestCase):
@@ -990,7 +999,7 @@ class ClientConnectorSubmitSmRetrialTestCases(SMSCSimulatorRecorder):
 
     @defer.inlineCallbacks
     def test_retryable_error_publishes_dlr_only_on_final_outcome(self):
-        self.amqpBroker.publish = Mock(wraps=self.amqpBroker.publish)
+        self.amqpBroker.publish_confirmed = Mock(wraps=self.amqpBroker.publish_confirmed)
         yield self.connect('127.0.0.1', self.pbPort)
         yield self.add(self.defaultConfig)
         yield self.start(self.defaultConfig.id)
@@ -1003,7 +1012,7 @@ class ClientConnectorSubmitSmRetrialTestCases(SMSCSimulatorRecorder):
         yield self.stop(self.defaultConfig.id)
         yield waitFor(2)
 
-        dlr_publishes = [call for call in self.amqpBroker.publish.call_args_list
+        dlr_publishes = [call for call in self.amqpBroker.publish_confirmed.call_args_list
                          if call.kwargs.get('routing_key') == 'dlr.submit_sm_resp']
         # A retried message emits one submit_sm_resp DLR: the terminal one once retries are exhausted,
         # never one per retryable attempt (which would evict the correlation map mid-flight).

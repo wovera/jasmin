@@ -2,6 +2,7 @@
 Test cases for mapping every segment of a long message back to its submit
 """
 
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,17 +17,17 @@ from jasmin.managers.dlr import DLRLookup, acknowledged_smpp_msgids
 from jasmin.managers.listeners import segment_smpp_msgids
 
 
-def submit_sm_resp(message_id):
-    return SimpleNamespace(params={'message_id': message_id})
+def submit_sm_resp(message_id, status=CommandStatus.ESME_ROK):
+    return SimpleNamespace(params={'message_id': message_id}, status=status)
 
 
-def parted_submit(message_ids):
+def parted_submit(message_ids, statuses=None):
     """A request PDU chain whose segments were each acknowledged with their own id."""
     segments = []
-    for message_id in message_ids:
+    for message_id, status in zip(message_ids, statuses or [CommandStatus.ESME_ROK] * len(message_ids)):
         segment = SimpleNamespace()
         if message_id is not None:
-            segment.response = submit_sm_resp(message_id)
+            segment.response = submit_sm_resp(message_id, status)
         segments.append(segment)
 
     for current, following in zip(segments, segments[1:]):
@@ -52,6 +53,14 @@ class SegmentMsgidCollectionTestCase(TestCase):
         self.assertEqual(
             [b'a', b'c'],
             segment_smpp_msgids(parted_submit([b'a', None, b'c'])))
+
+    def test_skips_a_segment_the_smsc_refused(self):
+        # A refused segment's id names nothing the SMSC holds, so no receipt may resolve through it.
+        self.assertEqual(
+            [b'a', b'c'],
+            segment_smpp_msgids(parted_submit(
+                [b'a', b'b', b'c'],
+                [CommandStatus.ESME_ROK, CommandStatus.ESME_RTHROTTLED, CommandStatus.ESME_ROK])))
 
 
 class AcknowledgedMsgidsTestCase(TestCase):
@@ -110,6 +119,25 @@ class RedisFanOutTestCase(TestCase):
         # Every key gets its own expiry, or a mapped segment outlives or predeceases its siblings.
         expired = [call.args[0] for call in self.redisClient.expire.call_args_list]
         self.assertEqual(mapped, expired)
+
+    @defer.inlineCallbacks
+    def test_an_in_doubt_outcome_maps_its_accepted_segments_and_forwards_the_doubt(self):
+        self.dlrLookup.config.dlr_forward_queue = 'outcomes'
+        self.dlrLookup.amqpBroker.publish_confirmed.return_value = defer.succeed(None)
+        self.redisClient.hgetall.return_value = defer.succeed(
+            {'sc': 'httpapi', 'url': '', 'level': 3, 'method': 'POST', 'expiry': 86400, 'connector': 'abc'})
+        message = self.submitSmRespMessage('A')
+        message.content.body = b'DISCARDED'
+        message.routing_key = 'dlr.submit_sm_resp'
+        message.content.properties['headers'].update({'accepted_segments': 1, 'discard_reason': 'in_doubt'})
+
+        yield self.dlrLookup.submit_sm_resp_dlr_callback(message)
+
+        self.assertEqual(['queue-msgid:A'], [call.args[0] for call in self.redisClient.hmset.call_args_list])
+        forwarded = json.loads(self.dlrLookup.amqpBroker.publish_confirmed.call_args.kwargs['content'].body)
+        self.assertEqual((forwarded['command_status'], forwarded['discard_reason'], forwarded['accepted_segments']),
+                         ('DISCARDED', 'in_doubt', 1))
+        self.redisClient.delete.assert_not_called()
 
     @defer.inlineCallbacks
     def test_a_single_submit_still_maps_its_one_id(self):

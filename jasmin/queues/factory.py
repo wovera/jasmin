@@ -8,9 +8,10 @@ from twisted.internet import defer, reactor
 from twisted.internet.protocol import ClientFactory
 
 from jasmin.queues.protocol import AmqpProtocol
-from jasmin.tools.jitter import jittered
+from jasmin.tools.jitter import backoff
 
 LOG_CATEGORY = "jasmin-amqp-factory"
+PUBLICATION_DEADLINE_SECONDS = 15
 
 
 class AmqpFactory(ClientFactory):
@@ -18,6 +19,7 @@ class AmqpFactory(ClientFactory):
 
     def __init__(self, config):
         self.reconnectTimer = None
+        self.reconnectAttempts = 0
         self.connectionRetry = True
         self.connected = False
         self.config = config
@@ -27,6 +29,8 @@ class AmqpFactory(ClientFactory):
 
         self.client = None  # the pika connection (TwistedProtocolConnection), set in buildProtocol
         self.chan = None  # the control channel (declares + publishes); consumers get their own via newChannel()
+        self.confirmChan = None
+        self.confirmLock = defer.DeferredLock()
         self.queues = []
         self.channelReadyCallbacks = []
 
@@ -36,6 +40,7 @@ class AmqpFactory(ClientFactory):
             virtual_host=config.vhost,
             credentials=pika.PlainCredentials(config.username, config.password),
             heartbeat=config.heartbeat,
+            blocked_connection_timeout=PUBLICATION_DEADLINE_SECONDS,
         )
 
         # Set up a dedicated logger
@@ -86,7 +91,8 @@ class AmqpFactory(ClientFactory):
         self.connected = False
 
         if self.config.reconnectOnConnectionFailure and self.connectionRetry:
-            delay = jittered(self.config.reconnectOnConnectionFailureDelay)
+            delay = backoff(self.config.reconnectOnConnectionFailureDelay, self.reconnectAttempts)
+            self.reconnectAttempts += 1
             self.log.info("Reconnecting after %.1f seconds ...", delay)
             self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:
@@ -105,7 +111,8 @@ class AmqpFactory(ClientFactory):
         self.chan = None
 
         if self.config.reconnectOnConnectionLoss and self.connectionRetry:
-            delay = jittered(self.config.reconnectOnConnectionLossDelay)
+            delay = backoff(self.config.reconnectOnConnectionLossDelay, self.reconnectAttempts)
+            self.reconnectAttempts += 1
             self.log.info("Reconnecting after %.1f seconds ...", delay)
             self.reconnectTimer = reactor.callLater(delay, self.reConnect, connector)
         else:
@@ -143,7 +150,9 @@ class AmqpFactory(ClientFactory):
         self.log.info("AMQP connection ready; opening control channel")
         try:
             self.chan = yield connection.channel()
+            self.chan.on_closed.addBoth(self._reopen_control_channel, connection)
             self.connected = True
+            self.reconnectAttempts = 0
             self.queues = []
             self.channelReady.callback(self)
             if self.connectDeferred is not None and not self.connectDeferred.called:
@@ -158,6 +167,21 @@ class AmqpFactory(ClientFactory):
             except Exception as e:
                 # Swallowed so one consumer cannot strand the others on this connection.
                 self.log.error("Channel-ready callback failed; its queue is unattended: %s", e)
+
+    @defer.inlineCallbacks
+    def _reopen_control_channel(self, reason, connection):
+        # The broker closes a channel on a faulty command while the connection lives on; left closed, every later
+        # publish and declare fails until the whole connection drops.
+        if connection is not self.client or not connection.is_open:
+            return
+        self.log.error("Control channel closed (%s), reopening it", reason)
+        try:
+            chan = yield connection.channel()
+        except Exception as e:
+            self.log.error("Control channel could not be reopened: %s", e)
+            return
+        chan.on_closed.addBoth(self._reopen_control_channel, connection)
+        self.chan = chan
 
     def _on_connection_failed(self, error):
         self.log.error("AMQP connection/channel setup failed: %s", error)
@@ -214,6 +238,54 @@ class AmqpFactory(ClientFactory):
             body=content.pika_body,
             properties=content.pika_properties,
         )
+
+    @defer.inlineCallbacks
+    def publish_confirmed(self, exchange='', routing_key='', content=None, mandatory=True, guard=None):
+        """Publish a Content on the confirm channel and wait for the broker's confirmation, one publication at a
+        time: pika keeps a single pending basic.return per channel, so a return could fail or pass the wrong one.
+        A guard runs once the publisher is ours, and a failing guard publishes nothing. A channel setup or publication
+        unanswered after PUBLICATION_DEADLINE_SECONDS fails and aborts the connection; the broker may still have
+        taken it."""
+        if not self.connected:
+            raise IOError('AMQP Client is not connected, cannot publish to [%s/%s]' % (exchange, routing_key))
+        yield self.confirmLock.acquire()
+        try:
+            chan = yield self.withinDeadline(self.confirmedChannel())
+            if guard is not None:
+                yield guard()
+            yield self.withinDeadline(chan.basic_publish(
+                exchange=exchange,
+                routing_key=routing_key,
+                body=content.pika_body,
+                properties=content.pika_properties,
+                mandatory=mandatory,
+            ))
+        finally:
+            self.confirmLock.release()
+
+    def withinDeadline(self, operation):
+        """A graceful close waits on the very broker that stopped answering, so an operation still unanswered after
+        PUBLICATION_DEADLINE_SECONDS aborts the connection and fails with TimeoutError."""
+        def abort(failure):
+            failure.trap(defer.TimeoutError)
+            self.client.transport.abortConnection()
+            return failure
+        return operation.addTimeout(PUBLICATION_DEADLINE_SECONDS, reactor).addErrback(abort)
+
+    @defer.inlineCallbacks
+    def confirmedChannel(self):
+        """The one confirm-mode publisher channel, reopened and put back in confirm mode before reuse once the broker
+        has closed it: pika fails every publish on a closed channel for good. Called under confirmLock."""
+        if self.confirmChan is None or not self.confirmChan.is_open:
+            chan = yield self.newChannel()
+            try:
+                yield chan.confirm_delivery()
+            except Exception:
+                if chan.is_open:
+                    chan.close()
+                raise
+            self.confirmChan = chan
+        return self.confirmChan
 
     def stopConnectionRetrying(self):
         """Stop the factory from reconnecting (reset to True on the next connect())."""

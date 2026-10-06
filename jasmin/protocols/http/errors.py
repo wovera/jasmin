@@ -76,6 +76,16 @@ class SubmitNotConfirmedError(HttpApiError):
         HttpApiError.__init__(self, 503, message)
 
 
+class SubmitInDoubtError(HttpApiError):
+    """Raised when the broker neither confirmed nor refused the submit publish: it may be queued, and a retry with
+    the same msgid replays this submit instead of queueing it again"""
+
+    token = 'submit_in_doubt'
+
+    def __init__(self, message='Submit outcome unknown, retry with the same msgid'):
+        HttpApiError.__init__(self, 503, message)
+
+
 class AuthenticationError(HttpApiError):
     """Raised on authentication error"""
 

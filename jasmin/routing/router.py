@@ -1,3 +1,4 @@
+import json
 import pickle
 import sys
 import logging
@@ -9,17 +10,23 @@ from logging.handlers import TimedRotatingFileHandler
 from twisted.internet import defer, reactor
 from twisted.spread import pb
 from pika.exceptions import ConsumerCancelled
+from smpp.pdu.pdu_encoding import DataCodingEncoder
 
 import jasmin
+from jasmin.managers.dlr import DLR_FORWARD_MAX_ATTEMPTS, PARKED_QUEUE
 from jasmin.routing.InterceptionTables import (MOInterceptionTable,
                                                MTInterceptionTable,
                                                InvalidInterceptionTableParameterError)
 from jasmin.routing.RoutingTables import MORoutingTable, MTRoutingTable, InvalidRoutingTableParameterError
 from jasmin.routing.content import RoutedDeliverSmContent
+from jasmin.queues.content import Content
 from jasmin.queues.delivery import DeliveryMessage
+from jasmin.tools.jitter import backoff
 from jasmin.tools.migrations.configuration import ConfigurationMigrator
 
 LOG_CATEGORY = "jasmin-router"
+MO_FORWARD_PREFETCH_COUNT = 8
+DELIVER_SM_QUEUE = 'RouterPB_deliver_sm_all.durable'
 
 
 class RouterPB(pb.Avatar):
@@ -27,6 +34,8 @@ class RouterPB(pb.Avatar):
         self.config = RouterPBConfig
         self.persistenceTimer = None
         self.avatar = None
+        self.requeueTimers = {}
+        self.forwardFailures = {}
         self.deliver_sm_chan = None  # this consumer's own channel (per-consumer channel isolates delivery tags)
         self.bill_chan = None  # this consumer's own channel (per-consumer channel isolates delivery tags)
 
@@ -89,14 +98,21 @@ class RouterPB(pb.Avatar):
 
     @defer.inlineCallbacks
     def subscribe(self):
+        if self.config.mo_forward_queue:
+            yield self.amqpBroker.named_queue_declare(queue=self.config.mo_forward_queue, durable=True)
+            yield self.amqpBroker.named_queue_declare(queue=PARKED_QUEUE % self.config.mo_forward_queue, durable=True)
+
         # Subscribe to deliver.sm.* queues
         consumerTag = 'RouterPB-delivers'
         routingKey = 'deliver.sm.*'
-        queueName = 'RouterPB_deliver_sm_all'  # A local queue to RouterPB
+        queueName = DELIVER_SM_QUEUE
         self.deliver_sm_chan = yield self.amqpBroker.newChannel()
         yield self.deliver_sm_chan.exchange_declare(exchange='messaging', exchange_type='topic')
-        yield self.amqpBroker.named_queue_declare(queue=queueName)
+        # Durable: the listener acknowledged these MOs to the carrier once the broker took them.
+        yield self.amqpBroker.named_queue_declare(queue=queueName, durable=True)
         yield self.deliver_sm_chan.queue_bind(queue=queueName, exchange="messaging", routing_key=routingKey)
+        if self.config.mo_forward_queue:
+            yield self.deliver_sm_chan.basic_qos(prefetch_count=MO_FORWARD_PREFETCH_COUNT)
         self.deliver_sm_q, _consumer_tag = yield self.deliver_sm_chan.basic_consume(
             queue=queueName, auto_ack=False, consumer_tag=consumerTag)
         self.deliver_sm_q.get().addCallback(self._on_deliver_sm).addErrback(self.deliver_sm_errback)
@@ -121,11 +137,12 @@ class RouterPB(pb.Avatar):
         # broker restart takes the queues too, so inbound messages and billing requests would go unrouted.
         self.amqpBroker.addChannelReadyCallback(self.subscribe)
 
-    def rejectMessage(self, message):
+    def rejectMessage(self, message, requeue=0):
+        self.clearRequeueTimer(message)
         # Reject on the channel that delivered the message. If that channel has since closed, the broker
         # has already requeued the delivery, so there is nothing left to do.
         try:
-            message.channel.basic_reject(delivery_tag=message.delivery_tag, requeue=0)
+            message.channel.basic_reject(delivery_tag=message.delivery_tag, requeue=requeue)
         except Exception as e:
             self.log.warning("Could not reject message (delivering channel likely closed): %s", e)
 
@@ -134,6 +151,16 @@ class RouterPB(pb.Avatar):
             message.channel.basic_ack(delivery_tag=message.delivery_tag)
         except Exception as e:
             self.log.warning("Could not ack message (delivering channel likely closed): %s", e)
+
+    def clearRequeueTimer(self, message):
+        timer = self.requeueTimers.pop(message, None)
+        if timer and timer.active():
+            timer.cancel()
+
+    def stopService(self):
+        self.cancelPersistenceTimer()
+        for message in list(self.requeueTimers):
+            self.clearRequeueTimer(message)
 
     def activatePersistenceTimer(self):
         if self.persistenceTimer and self.persistenceTimer.active():
@@ -169,6 +196,32 @@ class RouterPB(pb.Avatar):
 
         self.activatePersistenceTimer()
 
+    def forward_mo(self, msgid, pdu, scid):
+        if pdu.params.get('short_message'):
+            message = pdu.params['short_message']
+        elif 'message_payload' in pdu.params:
+            message = pdu.params['message_payload']
+        elif 'short_message' in pdu.params:
+            message = pdu.params['short_message']
+        else:
+            raise ValueError('Cannot find content in pdu')
+        if isinstance(message, str):
+            message = message.encode()
+
+        source = pdu.params['source_addr']
+        destination = pdu.params['destination_addr']
+        payload = {
+            'id': msgid,
+            'from': source.decode(errors='replace') if isinstance(source, bytes) else source,
+            'to': destination.decode(errors='replace') if isinstance(destination, bytes) else destination,
+            'origin-connector': scid.decode(errors='replace') if isinstance(scid, bytes) else scid,
+            'coding': DataCodingEncoder().encode(pdu.params['data_coding'])[0],
+            'binary': message.hex(),
+        }
+        return Content(
+            json.dumps(payload),
+            properties={'content-type': 'application/json', 'delivery-mode': 2})
+
     def _on_deliver_sm(self, received):
         return self.deliver_sm_callback(DeliveryMessage(received))
 
@@ -180,6 +233,7 @@ class RouterPB(pb.Avatar):
         c.f. test_router.DeliverSmDeliveryTestCases for use cases
         """
         msgid = message.content.properties['message-id']
+        self.clearRequeueTimer(message)
         scid = message.content.properties['headers']['connector-id']
         concatenated = message.content.properties['headers']['concatenated']
         will_be_concatenated = message.content.properties['headers']['will_be_concatenated']
@@ -189,6 +243,34 @@ class RouterPB(pb.Avatar):
         # @todo: Implement MO throttling here, same as in
         # jasmin.managers.listeners.SMPPClientSMListener.submit_sm_callback
         self.deliver_sm_q.get().addCallback(self._on_deliver_sm).addErrback(self.deliver_sm_errback)
+
+        if self.config.mo_forward_queue:
+            if will_be_concatenated:
+                yield self.rejectMessage(message)
+                return
+            try:
+                forward = self.forward_mo(msgid, routable.pdu, scid)
+            except Exception as e:
+                self.log.error('Cannot build forward of MO[%s], rejecting: %s', msgid, e)
+                yield self.rejectMessage(message)
+                return
+            queue = self.config.mo_forward_queue
+            failures = self.forwardFailures.get(msgid, 0)
+            if failures >= DLR_FORWARD_MAX_ATTEMPTS:
+                queue = PARKED_QUEUE % queue
+                self.log.critical('MO[%s] parked on %s after %s unconfirmed forwards', msgid, queue, failures)
+            try:
+                yield self.amqpBroker.publish_confirmed(exchange='', routing_key=queue, content=forward)
+            except Exception as e:
+                self.forwardFailures[msgid] = failures + 1
+                self.log.error('Forward of MO[%s] failed, requeuing: %s', msgid, e)
+                self.clearRequeueTimer(message)
+                self.requeueTimers[message] = reactor.callLater(
+                    backoff(self.config.mo_forward_retry_delay, failures), self.rejectMessage, message, requeue=1)
+            else:
+                self.forwardFailures.pop(msgid, None)
+                yield self.ackMessage(message)
+            return
 
         # Routing
         route = self.getMORoutingTable().getRouteFor(routable)
