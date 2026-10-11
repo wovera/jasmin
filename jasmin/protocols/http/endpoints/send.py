@@ -66,8 +66,7 @@ def update_submit_sm_pdu(routable, config, config_update_params=None):
     return routable
 
 
-LANE_TRANSACTIONAL = 3
-LANE_BULK = 0
+LANES = {b'express': 3, b'transactional': 2, b'bulk': 0}
 
 
 class Send(Resource):
@@ -265,8 +264,7 @@ class Send(Resource):
             # Set a placeholder for any parameter update to be applied on the pdu(s)
             param_updates = {}
 
-            lane = updated_request.args.get(b'lane', [b'transactional'])[0]
-            priority = LANE_BULK if lane == b'bulk' else LANE_TRANSACTIONAL
+            priority = LANES[updated_request.args.get(b'lane', [b'transactional'])[0]]
             priority_flag = None
             if b'priority' in updated_request.args:
                 wanted = int(updated_request.args[b'priority'][0])
@@ -468,7 +466,7 @@ class Send(Resource):
                       # Priority validation pattern can be validated/filtered further more
                       # through HttpAPICredentialValidator
                       b'priority': {'optional': True, 'pattern': re.compile(rb'^[0-3]$')},
-                      b'lane': {'optional': True, 'pattern': re.compile(rb'^(transactional|bulk)$')},
+                      b'lane': {'optional': True, 'pattern': re.compile(b'^(' + b'|'.join(LANES) + b')$')},
                       b'tag_batch': {'optional': True, 'pattern': TAG_PATTERN},
                       b'tag_account': {'optional': True, 'pattern': TAG_PATTERN},
                       b'sdt': {'optional': True,

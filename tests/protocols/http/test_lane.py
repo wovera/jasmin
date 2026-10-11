@@ -31,6 +31,12 @@ class LaneTestCases(HTTPApiTestCases):
     def test_transactional_is_the_default_lane(self):
         yield self.web.post(b'send', {b'username': self.username, b'password': b'correct',
                                       b'to': b'06155423', b'content': 'x'})
+        self.assertEqual(self.clientManager_f.perspective_submit_sm.call_args.kwargs['priority'], 2)
+
+    @defer.inlineCallbacks
+    def test_express_lane_publishes_ahead_of_transactional(self):
+        yield self.web.post(b'send', {b'username': self.username, b'password': b'correct',
+                                      b'to': b'06155423', b'content': 'x', b'lane': b'express'})
         self.assertEqual(self.clientManager_f.perspective_submit_sm.call_args.kwargs['priority'], 3)
 
     @defer.inlineCallbacks
