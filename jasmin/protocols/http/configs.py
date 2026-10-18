@@ -26,6 +26,7 @@ class HTTPApiConfig(ConfigFile):
         self.log_level = logging.getLevelName(self._get('http-api', 'log_level', 'INFO'))
         self.log_file = self._get('http-api', 'log_file', '%s/http-api.log' % LOG_PATH)
         self.log_rotate = self._get('http-api', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('http-api', 'log_backup_count', 7)
         self.log_format = self._get(
             'http-api', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('http-api', 'log_date_format', '%Y-%m-%d %H:%M:%S')

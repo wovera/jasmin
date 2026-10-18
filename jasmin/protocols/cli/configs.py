@@ -24,6 +24,7 @@ class JCliConfig(ConfigFile):
         self.log_level = logging.getLevelName(self._get('jcli', 'log_level', 'INFO'))
         self.log_file = self._get('jcli', 'log_file', '%s/jcli.log' % LOG_PATH)
         self.log_rotate = self._get('jcli', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('jcli', 'log_backup_count', 7)
         self.log_format = self._get(
             'jcli', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('jcli', 'log_date_format', '%Y-%m-%d %H:%M:%S')

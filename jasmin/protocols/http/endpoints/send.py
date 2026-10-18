@@ -15,6 +15,8 @@ from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.protocols.smpp.configs import SMPPClientConfig
 from jasmin.protocols.smpp.operations import SMPPOperationFactory, LongMessageExceedsMaxPartsError, count_pdus
 from jasmin.tools.tlv import format_tlvs_for_log
+from jasmin.tools.logs import mask_address
+from jasmin.tools.metrics import SEND_RESPONSES
 from jasmin.tools.tlv_encoder import normalize_custom_tlvs
 from jasmin.protocols.http.errors import (UrlArgsValidationError, LongContentExceededError, ERROR_CODE_HEADER,
                                           SEGMENT_COUNT_HEADER, CONNECTOR_HEADER)
@@ -398,6 +400,7 @@ class Send(Resource):
         finally:
             self.log.debug("Returning %s to %s.", response, updated_request.getClientIP())
             updated_request.setResponseCode(response['status'])
+            SEND_RESPONSES.labels(code=response['status']).inc()
             if 'token' in response:
                 updated_request.setHeader(ERROR_CODE_HEADER, response['token'])
             if response['status'] == 200 and routedConnector is not None:
@@ -428,10 +431,11 @@ class Send(Resource):
                     priority,
                     priority_flag,
                     dlr_level_text,
-                    routable.pdu.params['source_addr'],
-                    updated_request.args[b'to'][0],
+                    mask_address(routable.pdu.params['source_addr'], self.config.log_privacy),
+                    mask_address(updated_request.args[b'to'][0], self.config.log_privacy),
                     logged_content,
-                    format_tlvs_for_log(routable.pdu, self.config.log_privacy))
+                    format_tlvs_for_log(routable.pdu, self.config.log_privacy),
+                    extra={'cid': routedConnector.cid, 'msgid': response['return']})
 
                 _return = 'Success "%s"' % response['return']
 
@@ -445,7 +449,7 @@ class Send(Resource):
         Note: This method MUST behave exactly like jasmin.protocols.smpp.factory.SMPPServerFactory.submit_sm_event
         """
 
-        self.log.debug("Rendering /send response with args: %s from %s", request.args, request.getClientIP())
+        self.log.debug("Rendering /send response from %s", request.getClientIP())
         request.responseHeaders.addRawHeader(b"content-type", b"text/plain")
         response = {'return': None, 'status': 200}
 
@@ -547,6 +551,7 @@ class Send(Resource):
 
             self.log.debug("Returning %s to %s.", response, updated_request.getClientIP())
             updated_request.setResponseCode(response['status'])
+            SEND_RESPONSES.labels(code=response['status']).inc()
             updated_request.setHeader(ERROR_CODE_HEADER, e.token)
 
             return b'Error "%s"' % (response['return'] if isinstance(response['return'], bytes) else response['return'].encode())
@@ -556,6 +561,7 @@ class Send(Resource):
 
             self.log.debug("Returning %s to %s.", response, updated_request.getClientIP())
             updated_request.setResponseCode(response['status'])
+            SEND_RESPONSES.labels(code=response['status']).inc()
             updated_request.setHeader(ERROR_CODE_HEADER, ServerError.token)
 
             return b'Error "%s"' % response['return'].encode()

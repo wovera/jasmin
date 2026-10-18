@@ -1,9 +1,8 @@
-import sys
 import logging
-from logging.handlers import TimedRotatingFileHandler
 import txredisapi as redis
 from twisted.internet import reactor
 from twisted.internet import defer
+from jasmin.tools.logs import configure_logger
 from jasmin.redis.configs import RedisForJasminConfig
 
 LOG_CATEGORY = "jasmin-redis-client"
@@ -46,21 +45,10 @@ class RedisForJasminFactory(redis.RedisFactory):
 
         # Set up a dedicated logger
         self.log = logging.getLogger(LOG_CATEGORY)
-        if config is not None:
-            self.log.setLevel(config.log_level)
-            if 'stdout' in config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=config.log_file,
-                                                   when=config.log_rotate)
-            formatter = logging.Formatter(config.log_format, config.log_date_format)
-            handler.setFormatter(formatter)
+        if config is None:
+            self.log.addHandler(logging.NullHandler())
         else:
-            handler = logging.NullHandler()
-
-        if len(self.log.handlers) != 1:
-            self.log.addHandler(handler)
-            self.log.propagate = False
+            configure_logger(LOG_CATEGORY, config)
 
 
 def makeConnection(host, port, dbid, poolsize, reconnect, isLazy, _RedisForJasminConfig=None):

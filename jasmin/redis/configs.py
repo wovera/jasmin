@@ -33,6 +33,7 @@ class RedisForJasminConfig(ConfigFile):
         self.log_file = self._get('redis-client',
                                   'log_file', '%s/redis-client.log' % LOG_PATH)
         self.log_rotate = self._get('redis-client', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('redis-client', 'log_backup_count', 7)
         self.log_format = self._get('redis-client',
                                     'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('redis-client', 'log_date_format', '%Y-%m-%d %H:%M:%S')

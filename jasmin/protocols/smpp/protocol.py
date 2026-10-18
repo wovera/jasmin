@@ -2,6 +2,7 @@
 import logging
 import re
 import struct
+import time
 import uuid
 from datetime import datetime
 
@@ -21,6 +22,8 @@ from smpp.twisted.protocol import SMPPServerProtocol as twistedSMPPServerProtoco
 from smpp.twisted.protocol import (SMPPSessionStates, SMPPOutboundTxn,
                                                  SMPPOutboundTxnResult)
 from .error import *
+from jasmin.tools.logs import mask_address
+from jasmin.tools.metrics import SUBMIT_SM_RESP, SUBMIT_SM_ROUNDTRIP
 
 # @todo: LOG_CATEGORY seems to be unused, check before removing it
 LOG_CATEGORY = "smpp.twisted.protocol"
@@ -45,6 +48,7 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
         twistedSMPPClientProtocol.__init__(self)
 
         self.longSubmitSmTxns = {}
+        self.submitSentAt = {}
 
     def PDUReceived(self, pdu):
         self.log.debug("SMPP Client received PDU [command: %s, seq_number: %s, command_status: %s]",
@@ -82,6 +86,7 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
 
         self.factory.stats.set('disconnected_at', datetime.now())
         self.factory.stats.inc('disconnected_count')
+        self.submitSentAt.clear()
 
     def doPDURequest(self, reqPDU, handler):
         twistedSMPPClientProtocol.doPDURequest(self, reqPDU, handler)
@@ -98,6 +103,11 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
         twistedSMPPClientProtocol.PDUResponseReceived(self, pdu)
 
         if pdu.commandId == CommandId.submit_sm_resp:
+            cid = self.factory.config.id
+            SUBMIT_SM_RESP.labels(cid=cid, status=pdu.status.name).inc()
+            sentAt = self.submitSentAt.pop(pdu.seqNum, None)
+            if sentAt is not None:
+                SUBMIT_SM_ROUNDTRIP.labels(cid=cid).observe(time.monotonic() - sentAt)
             if pdu.status == CommandStatus.ESME_RTHROTTLED:
                 self.factory.stats.inc('throttling_error_count')
             elif pdu.status != CommandStatus.ESME_ROK:
@@ -119,6 +129,7 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
             self.factory.stats.inc('elink_count')
         elif pdu.commandId == CommandId.submit_sm:
             self.factory.stats.inc('submit_sm_request_count')
+            self.submitSentAt[pdu.seqNum] = time.monotonic()
 
     def claimSeqNum(self):
         wrapSeqNumAtCeiling(self)
@@ -508,8 +519,8 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
                 self.log.info(
                     'DELIVER_SM [uid:%s] [from:%s] [to:%s] [content:%s]',
                     self.user.uid,
-                    pdu.params['source_addr'],
-                    pdu.params['destination_addr'],
+                    mask_address(pdu.params['source_addr'], self.config().log_privacy),
+                    mask_address(pdu.params['destination_addr'], self.config().log_privacy),
                     logged_content)
                 self.user.getCnxStatus().smpps['deliver_sm_count'] += 1
         elif pdu.commandId == CommandId.data_sm:
@@ -517,8 +528,8 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
             if self.user is not None:
                 self.log.info('DATA_SM [uid:%s] [from:%s] [to:%s] [content:%s]',
                               self.user.uid,
-                              pdu.params['source_addr'],
-                              pdu.params['destination_addr'],
+                              mask_address(pdu.params['source_addr'], self.config().log_privacy),
+                              mask_address(pdu.params['destination_addr'], self.config().log_privacy),
                               logged_content)
                 self.user.getCnxStatus().smpps['data_sm_count'] += 1
         elif pdu.commandId == CommandId.submit_sm_resp:

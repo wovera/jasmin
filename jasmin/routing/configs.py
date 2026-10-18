@@ -37,6 +37,7 @@ class RouterPBConfig(ConfigFile):
         # Logging
         self.log_level = logging.getLevelName(self._get('router', 'log_level', 'INFO'))
         self.log_rotate = self._get('router', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('router', 'log_backup_count', 7)
         self.log_file = self._get('router', 'log_file', '%s/router.log' % LOG_PATH)
         self.log_format = self._get(
             'router', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
@@ -58,6 +59,7 @@ class deliverSmThrowerConfig(ConfigFile):
         self.log_file = self._get(
             'deliversm-thrower', 'log_file', '%s/deliversm-thrower.log' % LOG_PATH)
         self.log_rotate = self._get('deliversm-thrower', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('deliversm-thrower', 'log_backup_count', 7)
         self.log_format = self._get(
             'deliversm-thrower', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('deliversm-thrower', 'log_date_format', '%Y-%m-%d %H:%M:%S')
@@ -81,6 +83,7 @@ class DLRThrowerConfig(ConfigFile):
         self.log_level = logging.getLevelName(self._get('dlr-thrower', 'log_level', 'INFO'))
         self.log_file = self._get('dlr-thrower', 'log_file', '%s/dlr-thrower.log' % LOG_PATH)
         self.log_rotate = self._get('dlr-thrower', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('dlr-thrower', 'log_backup_count', 7)
         self.log_format = self._get(
             'dlr-thrower', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('dlr-thrower', 'log_date_format', '%Y-%m-%d %H:%M:%S')

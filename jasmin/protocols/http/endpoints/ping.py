@@ -15,8 +15,7 @@ class Ping(Resource):
         Note: Ping is used to check Jasmin's http api
         """
 
-        self.log.debug("Rendering /ping response with args: %s from %s",
-                       request.args, request.getClientIP())
+        self.log.debug("Rendering /ping response from %s", request.getClientIP())
         self.log.info("Received ping from %s", request.getClientIP())
         request.setResponseCode(200)
         return b'Jasmin/PONG'

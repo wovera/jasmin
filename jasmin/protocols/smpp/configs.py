@@ -50,6 +50,7 @@ class SMPPClientConfig:
         # Logging configuration
         self.log_file = kwargs.get('log_file', '%s/default-%s.log' % (LOG_PATH, self.id))
         self.log_rotate = kwargs.get('log_rotate', 'midnight')
+        self.log_backup_count = kwargs.get('log_backup_count', 7)
         self.log_level = kwargs.get('log_level', logging.INFO)
         self.log_format = kwargs.get('log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = kwargs.get('log_dateformat', '%Y-%m-%d %H:%M:%S')
@@ -237,6 +238,7 @@ class SMPPClientServiceConfig(ConfigFile):
         self.log_file = self._get(
             'service-smppclient', 'log_file', '%s/service-smppclient.log' % LOG_PATH)
         self.log_rotate = self._get('service-smppclient', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('service-smppclient', 'log_backup_count', 7)
         self.log_format = self._get(
             'service-smppclient', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('service-smppclient', 'log_date_format', '%Y-%m-%d %H:%M:%S')
@@ -258,6 +260,7 @@ class SMPPServerConfig(ConfigFile):
         self.log_file = self._get(
             'smpp-server', 'log_file', '%s/default-%s.log' % (LOG_PATH, self.id))
         self.log_rotate = self._get('smpp-server', 'log_rotate', 'midnight')
+        self.log_backup_count = self._getint('smpp-server', 'log_backup_count', 7)
         self.log_format = self._get(
             'smpp-server', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('smpp-server', 'log_date_format', '%Y-%m-%d %H:%M:%S')
@@ -303,6 +306,7 @@ class SMPPServerPBConfig(ConfigFile):
         # Logging
         self.log_level = logging.getLevelName(self._get('smpp-server-pb', 'log_level', 'INFO'))
         self.log_rotate = self._get('smpp-server-pb', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('smpp-server-pb', 'log_backup_count', 7)
         self.log_file = self._get('smpp-server-pb', 'log_file', '%s/smpp-server-pb.log' % LOG_PATH)
         self.log_format = self._get(
             'smpp-server-pb', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')

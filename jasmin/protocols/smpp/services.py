@@ -1,6 +1,4 @@
-import sys
-import logging
-from logging.handlers import TimedRotatingFileHandler
+from jasmin.tools.logs import configure_logger
 from jasmin.protocols.smpp.factory import SMPPClientFactory
 from twisted.application import service
 from .configs import SMPPClientServiceConfig
@@ -18,19 +16,7 @@ class SMPPClientService(service.Service):
         self.SMPPClientServiceConfig = SMPPClientServiceConfig(self.config.getConfigFile())
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.SMPPClientServiceConfig.log_level)
-            if 'stdout' in self.SMPPClientServiceConfig.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.SMPPClientServiceConfig.log_file,
-                                                   when=self.SMPPClientServiceConfig.log_rotate)
-            formatter = logging.Formatter(self.SMPPClientServiceConfig.log_format,
-                                          self.SMPPClientServiceConfig.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(LOG_CATEGORY, self.SMPPClientServiceConfig)
 
         self.log.info('New SMPPClientService for [%s]', self.SMPPClientConfig.id)
 

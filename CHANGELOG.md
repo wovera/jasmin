@@ -10,6 +10,15 @@ on the fork mainline (newest first).
 
 ## Unreleased
 
+### 2026-10-17
+
+- **Changed — logs are JSON lines, set up in one place, and private.** Every component now configures its logger
+  through `jasmin.tools.logs.configure_logger` (`logging.config.dictConfig`) instead of a copied handler block. Each line
+  is one JSON object (`ts`, `level`, `logger`, `msg`, plus `cid`, `msgid`, `trace_id` when present). Rotated files are
+  bounded by the new `log_backup_count` option (default 7). Under `log_privacy`, the `from` and `to` numbers are masked
+  in SMS-MT and SMS-MO lines too, and request arguments (which carry the password) are never logged. `AccessLogSite`
+  sends the HTTP access log through the same setup without the query string.
+
 ### 2026-10-05
 
 - **Fixed — a submit that reached the wire is not sent again while its claim lives.** Immediately before a

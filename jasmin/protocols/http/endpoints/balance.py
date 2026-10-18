@@ -26,8 +26,7 @@ class Balance(Resource):
         Note: Balance is used by user to check his balance
         """
 
-        self.log.debug("Rendering /balance response with args: %s from %s",
-                       request.args, request.getClientIP())
+        self.log.debug("Rendering /balance response from %s", request.getClientIP())
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         response = {'return': None, 'status': 200}
 

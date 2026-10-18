@@ -1,17 +1,15 @@
 import json
 import pickle
-import sys
-import logging
 import time
 from copy import copy
 from hashlib import md5
-from logging.handlers import TimedRotatingFileHandler
 
 from twisted.internet import defer, reactor
 from twisted.spread import pb
 from pika.exceptions import ConsumerCancelled
 from smpp.pdu.pdu_encoding import DataCodingEncoder
 
+from jasmin.tools.logs import configure_logger
 import jasmin
 from jasmin.managers.dlr import DLR_FORWARD_MAX_ATTEMPTS, PARKED_QUEUE
 from jasmin.routing.InterceptionTables import (MOInterceptionTable,
@@ -40,18 +38,7 @@ class RouterPB(pb.Avatar):
         self.bill_chan = None  # this consumer's own channel (per-consumer channel isolates delivery tags)
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file,
-                                               when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(LOG_CATEGORY, self.config)
 
         # Set pickleProtocol
         self.pickleProtocol = self.config.pickle_protocol

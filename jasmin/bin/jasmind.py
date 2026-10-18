@@ -12,7 +12,6 @@ from twisted.cred.checkers import AllowAnonymousAccess, InMemoryUsernamePassword
 from twisted.internet import reactor, defer
 from twisted.python import usage
 from twisted.spread import pb
-from twisted.web import server
 
 from jasmin.interceptor.configs import InterceptorPBClientConfig
 from jasmin.interceptor.proxies import InterceptorPBProxy
@@ -22,6 +21,8 @@ from jasmin.managers.dlr import DLRLookup
 from jasmin.protocols.cli.configs import JCliConfig
 from jasmin.protocols.cli.factory import JCliFactory
 from jasmin.protocols.http.configs import HTTPApiConfig
+from jasmin.protocols.http.accesslog import AccessLogSite
+from jasmin.tools.logs import JsonFormatter
 from jasmin.protocols.http.server import HTTPApi
 from jasmin.protocols.smpp.configs import SMPPServerConfig, SMPPServerPBConfig
 from jasmin.protocols.smpp.factory import SMPPServerFactory
@@ -73,7 +74,7 @@ class JasminDaemon(BaseDaemon):
         self.log = logging.getLogger(LOG_CATEGORY)
         self.log.setLevel(logging.INFO)
         handler = logging.StreamHandler(sys.stdout)
-        formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(process)d %(message)s', '%Y-%m-%d %H:%M:%S')
+        formatter = JsonFormatter()
         handler.setFormatter(formatter)
         self.log.addHandler(handler)
         self.log.propagate = False
@@ -293,7 +294,7 @@ class JasminDaemon(BaseDaemon):
 
         self.components['http-api-server'] = reactor.listenTCP(
             httpApiConfigInstance.port,
-            server.Site(self.components['http-api-factory'], logPath=httpApiConfigInstance.access_log),
+            AccessLogSite(self.components['http-api-factory'], httpApiConfigInstance),
             interface=httpApiConfigInstance.bind)
 
     def stopHTTPApiService(self):

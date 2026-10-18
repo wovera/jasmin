@@ -2,7 +2,7 @@
 
 import logging
 import os
-import sys
+from jasmin.tools.logs import configure_logger
 from jasmin.config import ConfigFile, ROOT_PATH, LOG_PATH
 
 CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
@@ -64,14 +64,8 @@ class RestAPIForJasminConfig(ConfigFile):
         self.log_format = self._get('rest-api', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')
         self.log_date_format = self._get('rest-api', 'log_date_format', '%Y-%m-%d %H:%M:%S')
 
-        self.logger = logging.getLogger('jasmin-restapi')
-        if len(self.logger.handlers) == 0:
-            self.logger.setLevel(self.log_level)
-            if 'stdout' in self.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = logging.handlers.TimedRotatingFileHandler(filename=self.log_file, when=self.log_rotate)
-            handler.setFormatter(logging.Formatter(self.log_format, self.log_date_format))
-            self.logger.addHandler(handler)
+        self.log_backup_count = self._getint('rest-api', 'log_backup_count', 7)
+
+        self.logger = configure_logger('jasmin-restapi', self)
 
 

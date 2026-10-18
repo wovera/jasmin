@@ -168,8 +168,7 @@ class Rate(Resource):
         Note: This method will indicate the rate of the message once sent
         """
 
-        self.log.debug("Rendering /rate response with args: %s from %s",
-                       request.args, request.getClientIP())
+        self.log.debug("Rendering /rate response from %s", request.getClientIP())
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         response = {'return': None, 'status': 200}
 

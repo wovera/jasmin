@@ -1,10 +1,7 @@
 import binascii
 import json
 import pickle
-import sys
-import logging
 from enum import Enum
-from logging.handlers import TimedRotatingFileHandler
 
 from twisted.application.service import Service
 from twisted.internet import defer
@@ -16,6 +13,7 @@ from treq import text_content
 from smpp.pdu.constants import priority_flag_name_map
 from smpp.pdu.pdu_encoding import DataCodingEncoder
 
+from jasmin.tools.logs import configure_logger
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.protocols.smpp.factory import SMPPServerFactory
 from jasmin.protocols.smpp.operations import SMPPOperationFactory
@@ -76,18 +74,7 @@ class Thrower(Service):
         self.smpps_access = None
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(self.log_category)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file,
-                                                   when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(self.log_category, self.config)
 
         self.log.info('Thrower configured and ready.')
 

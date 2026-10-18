@@ -1,11 +1,9 @@
-import logging
 from datetime import datetime
-from logging.handlers import TimedRotatingFileHandler
-import sys
 
 from twisted.internet import reactor
 from twisted.web.resource import Resource
 
+from jasmin.tools.logs import configure_logger
 import jasmin
 from jasmin.protocols.http.endpoints.send import Send
 from jasmin.protocols.http.endpoints.rate import Rate
@@ -34,17 +32,7 @@ class HTTPApi(Resource):
         stats.set('created_at', datetime.now())
 
         # Set up a dedicated logger
-        log = logging.getLogger(LOG_CATEGORY)
-        if len(log.handlers) != 1:
-            log.setLevel(config.log_level)
-            if 'stdout' in config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=config.log_file, when=config.log_rotate)
-            formatter = logging.Formatter(config.log_format, config.log_date_format)
-            handler.setFormatter(formatter)
-            log.addHandler(handler)
-            log.propagate = False
+        log = configure_logger(LOG_CATEGORY, config)
 
         self.log = log
         # Set http url routings
@@ -59,7 +47,7 @@ class HTTPApi(Resource):
         log.debug("Setting http url routing for /ping")
         self.putChild(b'ping', Ping(log))
         log.debug("Setting http url routing for /metrics")
-        self.putChild(b'metrics', Metrics(SMPPClientManagerPB, log))
+        self.putChild(b'metrics', Metrics(SMPPClientManagerPB))
         log.debug("Setting http url routing for /status")
         self.putChild(b'status', Status(SMPPClientManagerPB, log))
         self.putChild(b'connectors', Connectors(SMPPClientManagerPB, config.control_token, log))
@@ -75,7 +63,6 @@ class HTTPApi(Resource):
         return Resource.getChild(self, name, request)
 
     def render_GET(self, request):
-        self.log.debug("Rendering / response with args: %s from %s",
-                       request.args, request.getClientIP())
+        self.log.debug("Rendering / response from %s", request.getClientIP())
         request.setResponseCode(200)
         return jasmin.get_release().encode()

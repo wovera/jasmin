@@ -1,10 +1,9 @@
 import re
 import os
-import sys
 import logging
-from logging.handlers import TimedRotatingFileHandler
 from twisted.internet import reactor, defer
 from twisted.internet.protocol import ServerFactory
+from jasmin.tools.logs import configure_logger
 from jasmin.protocols.cli.jcli import JCliProtocol
 from jasmin.protocols.cli.protocol import CmdProtocol
 from twisted.conch.telnet import TelnetTransport, TelnetBootstrapProtocol
@@ -56,17 +55,7 @@ class JCliFactory(ServerFactory):
         self.loadConfigProfileWithCreds = loadConfigProfileWithCreds
 
         # Set up and configure a dedicated logger
-        self.log = logging.getLogger('jcli')
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file,
-                                                   when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
+        self.log = configure_logger('jcli', self.config)
 
         # Init protocol
         self.protocol = lambda: JCliTelnetTransport(TelnetBootstrapProtocol,

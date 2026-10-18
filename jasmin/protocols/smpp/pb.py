@@ -1,11 +1,9 @@
 import pickle
-import sys
-import logging
-from logging.handlers import TimedRotatingFileHandler
 
 from twisted.internet import defer
 from twisted.spread import pb
 
+from jasmin.tools.logs import configure_logger
 import jasmin
 
 LOG_CATEGORY = "jasmin-smpps-pb"
@@ -18,17 +16,7 @@ class SMPPServerPB(pb.Avatar):
         self.smpps = None
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file, when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(LOG_CATEGORY, self.config)
 
         self.log.info('SmppServerPB configured and ready.')
 

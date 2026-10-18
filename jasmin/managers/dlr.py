@@ -1,7 +1,4 @@
-import sys
 import json
-import logging
-from logging.handlers import TimedRotatingFileHandler
 
 from twisted.internet import defer
 from twisted.internet import reactor
@@ -10,6 +7,7 @@ from pika.exceptions import ConsumerCancelled
 from txredisapi import ConnectionError
 from smpp.pdu.pdu_types import RegisteredDeliveryReceipt
 
+from jasmin.tools.logs import configure_logger
 from jasmin.managers.content import DLRContentForHttpapi, DLRContentForSmpps
 from jasmin.queues.content import Content
 from jasmin.queues.delivery import DeliveryMessage
@@ -86,18 +84,7 @@ class DLRLookup:
         self.forward_failures = {}
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file,
-                                                   when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(LOG_CATEGORY, self.config)
 
         self.log.info('Started %s #%s.', self.__class__.__name__, self.pid)
 
@@ -634,7 +621,8 @@ class DLRLookup:
                 pdu_dlr_sub,
                 pdu_dlr_dlvrd,
                 pdu_dlr_err,
-                logged_content)
+                logged_content,
+                extra={'cid': pdu_cid})
 
 
 class DLRLookupSingleton(metaclass=Singleton):

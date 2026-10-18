@@ -35,6 +35,7 @@ class SMPPClientPBConfig(ConfigFile):
         self.log_file = self._get(
             'client-management', 'log_file', '%s/smppclient-manager.log' % LOG_PATH)
         self.log_rotate = self._get('client-management', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('client-management', 'log_backup_count', 7)
         self.log_format = self._get('client-management', 'log_format', DEFAULT_LOGFORMAT)
         self.log_date_format = self._get('client-management', 'log_date_format', '%Y-%m-%d %H:%M:%S')
         self.pickle_protocol = self._getint('client-management', 'pickle_protocol', 2)
@@ -76,6 +77,7 @@ class SMPPClientSMListenerConfig(ConfigFile):
         self.log_level = logging.getLevelName(self._get('sm-listener', 'log_level', 'INFO'))
         self.log_file = self._get('sm-listener', 'log_file', '%s/messages.log' % LOG_PATH)
         self.log_rotate = self._get('sm-listener', 'log_rotate', 'midnight')
+        self.log_backup_count = self._getint('sm-listener', 'log_backup_count', 7)
         self.log_format = self._get('sm-listener', 'log_format', DEFAULT_LOGFORMAT)
         self.log_date_format = self._get('sm-listener', 'log_date_format', '%Y-%m-%d %H:%M:%S')
         self.log_privacy = self._getbool('sm-listener', 'log_privacy', False)
@@ -100,6 +102,7 @@ class DLRLookupConfig(ConfigFile):
         self.log_level = logging.getLevelName(self._get('dlr', 'log_level', 'INFO'))
         self.log_file = self._get('dlr', 'log_file', '%s/messages.log' % LOG_PATH)
         self.log_rotate = self._get('dlr', 'log_rotate', 'midnight')
+        self.log_backup_count = self._getint('dlr', 'log_backup_count', 7)
         self.log_format = self._get('dlr', 'log_format', DEFAULT_LOGFORMAT)
         self.log_date_format = self._get('dlr', 'log_date_format', '%Y-%m-%d %H:%M:%S')
         self.log_privacy = self._getbool('dlr', 'log_privacy', False)

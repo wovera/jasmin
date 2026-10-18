@@ -29,6 +29,7 @@ class InterceptorPBConfig(ConfigFile):
         # Logging
         self.log_level = logging.getLevelName(self._get('interceptor', 'log_level', 'INFO'))
         self.log_rotate = self._get('interceptor', 'log_rotate', 'W6')
+        self.log_backup_count = self._getint('interceptor', 'log_backup_count', 7)
         self.log_file = self._get('interceptor', 'log_file', '%s/interceptor.log' % LOG_PATH)
         self.log_format = self._get(
             'interceptor', 'log_format', '%(asctime)s %(levelname)-8s %(process)d %(message)s')

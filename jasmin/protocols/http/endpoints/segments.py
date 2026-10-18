@@ -37,8 +37,7 @@ class Segments(Resource):
         must do so by building the very PDUs /send builds - a second count derived from the length would drift.
         """
 
-        self.log.debug("Rendering /segments response with args: %s from %s",
-                       request.args, request.getClientIP())
+        self.log.debug("Rendering /segments response from %s", request.getClientIP())
         request.responseHeaders.addRawHeader(b"content-type", b"application/json")
         response = {'return': None, 'status': 200}
 

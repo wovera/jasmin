@@ -2,12 +2,9 @@
 import hashlib
 import math
 import pickle
-import sys
-import logging
 import time
 from datetime import datetime, timedelta
 from uuid import uuid4
-from logging.handlers import TimedRotatingFileHandler
 
 from dateutil import parser
 from messaging.sms.udh import UserDataHeader
@@ -19,12 +16,14 @@ from smpp.pdu.pdu_types import CommandId, CommandStatus, DataCodingScheme, DataC
 from smpp.twisted.protocol import DataHandlerResponse
 from smpp.pdu.error import SMPPRequestTimoutError, SMPPGenericNackTransactionError
 
+from jasmin.tools.logs import configure_logger, mask_address
 from jasmin.managers.configs import SMPPClientPBConfig
 from jasmin.managers.content import (SubmitSmRespContent, DeliverSmContent, SubmitSmRespBillContent, DLR, Discard,
                                      IN_DOUBT)
 from jasmin.managers.dlr import PARKED_QUEUE
 from jasmin.queues.delivery import DeliveryMessage
 from jasmin.tools.jitter import backoff, jittered
+from jasmin.tools.metrics import DISCARDS, RECEIPT_STATES, RECEIPTS
 from jasmin.protocols.smpp.error import *
 from jasmin.protocols.smpp.operations import SMPPOperationFactory, count_pdus
 from jasmin.tools.tlv import format_tlvs_for_log
@@ -150,18 +149,7 @@ class SMPPClientSMListener:
         self.pickleProtocol = SMPPClientPBConfig(self.config.config_file).pickle_protocol
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file,
-                                                   when=self.config.log_rotate)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(LOG_CATEGORY, self.config)
 
     def setSubmitSmQ(self, queue):
         self.log.debug('Setting a new submit_sm_q: %s', queue)
@@ -253,6 +241,7 @@ class SMPPClientSMListener:
     def _discard(self, message, reason):
         msgid = message.content.properties['message-id']
         discard = Discard(msgid, reason, self.SMPPClientFactory.config.id)
+        DISCARDS.labels(cid=self.SMPPClientFactory.config.id, reason=reason).inc()
         attempts = self.discard_retrials.get(msgid, 0)
         try:
             if self.config.emit_discard_dlr:
@@ -671,10 +660,11 @@ class SMPPClientSMListener:
                     'none' if ('headers' not in amqpMessage.content.properties or
                                'expiration' not in amqpMessage.content.properties['headers'])
                     else amqpMessage.content.properties['headers']['expiration'],
-                    _pdu.params['source_addr'],
-                    _pdu.params['destination_addr'],
+                    mask_address(_pdu.params['source_addr'], self.config.log_privacy),
+                    mask_address(_pdu.params['destination_addr'], self.config.log_privacy),
                     logged_content,
-                    format_tlvs_for_log(_pdu, self.config.log_privacy))
+                    format_tlvs_for_log(_pdu, self.config.log_privacy),
+                    extra={'cid': self.SMPPClientFactory.config.id, 'msgid': msgid})
             else:
                 throttled = response.status == CommandStatus.ESME_RTHROTTLED and self.learned_rate
                 if throttled:
@@ -713,10 +703,11 @@ class SMPPClientSMListener:
                     'none' if ('headers' not in amqpMessage.content.properties or
                                'expiration' not in amqpMessage.content.properties['headers'])
                     else amqpMessage.content.properties['headers']['expiration'],
-                    r.request.params['source_addr'],
-                    r.request.params['destination_addr'],
+                    mask_address(r.request.params['source_addr'], self.config.log_privacy),
+                    mask_address(r.request.params['destination_addr'], self.config.log_privacy),
                     logged_content,
-                    format_tlvs_for_log(r.request, self.config.log_privacy))
+                    format_tlvs_for_log(r.request, self.config.log_privacy),
+                    extra={'cid': self.SMPPClientFactory.config.id, 'msgid': msgid})
 
             # Only a final outcome: a retryable error's receipt would evict the dlr: map a successful retry needs.
             if not will_be_retried:
@@ -1071,9 +1062,10 @@ class SMPPClientSMListener:
                         routable.pdu.status,
                         priority_flag,
                         validity_period,
-                        routable.pdu.params['source_addr'],
-                        routable.pdu.params['destination_addr'],
-                        logged_content)
+                        mask_address(routable.pdu.params['source_addr'], self.config.log_privacy),
+                        mask_address(routable.pdu.params['destination_addr'], self.config.log_privacy),
+                        logged_content,
+                        extra={'cid': self.SMPPClientFactory.config.id, 'msgid': msgid})
                 else:
                     # Long message part received
                     if self.redisClient is None:
@@ -1122,6 +1114,9 @@ class SMPPClientSMListener:
                             defer.returnValue(DataHandlerResponse(status=CommandStatus.ESME_RX_T_APPN))
             else:
                 # This is a DLR !
+                state = str(routable.pdu.dlr['stat'])
+                RECEIPTS.labels(cid=self.SMPPClientFactory.config.id,
+                                state=state if state in RECEIPT_STATES else 'OTHER').inc()
                 # Send DLR to DLRLookup
                 yield self.amqpBroker.publish_confirmed(exchange='messaging',
                                                         routing_key='dlr.deliver_sm',
@@ -1144,10 +1139,11 @@ class SMPPClientSMListener:
             self.log.info("SMS-MO [cid:%s] [i-status:%s] [from:%s] [to:%s] [content:%s] [tlvs:%s]",
                           self.SMPPClientFactory.config.id,
                           e.status,
-                          routable.pdu.params['source_addr'],
-                          routable.pdu.params['destination_addr'],
+                          mask_address(routable.pdu.params['source_addr'], self.config.log_privacy),
+                          mask_address(routable.pdu.params['destination_addr'], self.config.log_privacy),
                           logged_content,
-                          format_tlvs_for_log(routable.pdu, self.config.log_privacy))
+                          format_tlvs_for_log(routable.pdu, self.config.log_privacy),
+                          extra={'cid': self.SMPPClientFactory.config.id})
 
             # Known exception handling
             defer.returnValue(DataHandlerResponse(status=e.status))

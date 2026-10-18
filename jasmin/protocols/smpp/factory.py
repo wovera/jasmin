@@ -1,17 +1,15 @@
 # pylint: disable=W0401,W0611,W0231
 import pickle
-import sys
-import logging
 import re
 from enum import Enum
 from datetime import datetime, timedelta
-from logging.handlers import TimedRotatingFileHandler
 
 from OpenSSL import SSL
 from twisted.internet import defer, reactor, ssl
 from twisted.internet.protocol import ClientFactory
 from twisted.python.failure import Failure
 
+from jasmin.tools.logs import configure_logger, mask_address
 from jasmin.routing.Routables import RoutableSubmitSm
 from jasmin.tools.tlv import format_tlvs_for_log
 from jasmin.tools.jitter import backoff
@@ -58,18 +56,7 @@ class SMPPClientFactory(ClientFactory):
         self.stats.set('created_at', datetime.now())
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY_CLIENT_BASE + ".%s" % config.id)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(self.config.log_level)
-            _when = self.config.log_rotate if hasattr(self.config, 'log_rotate') else 'midnight'
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file, when=_when)
-            formatter = logging.Formatter(self.config.log_format, self.config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(LOG_CATEGORY_CLIENT_BASE + ".%s" % config.id, self.config)
 
         if msgHandler is None:
             self.msgHandler = self.msgHandlerStub
@@ -238,17 +225,7 @@ class SMPPServerFactory(_SMPPServerFactory):
         self.stats.set('created_at', datetime.now())
 
         # Set up a dedicated logger
-        self.log = logging.getLogger(LOG_CATEGORY_SERVER_BASE + ".%s" % config.id)
-        if len(self.log.handlers) != 1:
-            self.log.setLevel(config.log_level)
-            if 'stdout' in self.config.log_file:
-                handler = logging.StreamHandler(sys.stdout)
-            else:
-                handler = TimedRotatingFileHandler(filename=self.config.log_file, when=self.config.log_rotate)
-            formatter = logging.Formatter(config.log_format, config.log_date_format)
-            handler.setFormatter(formatter)
-            self.log.addHandler(handler)
-            self.log.propagate = False
+        self.log = configure_logger(LOG_CATEGORY_SERVER_BASE + ".%s" % config.id, self.config)
 
         self.msgHandler = self.submit_sm_event_interceptor
 
@@ -542,10 +519,11 @@ class SMPPServerFactory(_SMPPServerFactory):
                 routedConnector.cid,
                 message_id,
                 priority,
-                routable.pdu.params['source_addr'],
-                routable.pdu.params['destination_addr'],
+                mask_address(routable.pdu.params['source_addr'], self.config.log_privacy),
+                mask_address(routable.pdu.params['destination_addr'], self.config.log_privacy),
                 logged_content,
-                format_tlvs_for_log(routable.pdu, self.config.log_privacy))
+                format_tlvs_for_log(routable.pdu, self.config.log_privacy),
+                extra={'cid': routedConnector.cid, 'msgid': message_id})
             status = CommandStatus.ESME_ROK
         finally:
             if message_id is not None:
